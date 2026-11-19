@@ -460,7 +460,7 @@ export function EggPage() {
       if (!command) return;
       e.preventDefault();
       e.stopPropagation();
-      run(command);
+      runRef.current(command);
     };
     const onKeyUp = (e: KeyboardEvent) => {
       const s = live.current;
@@ -570,6 +570,10 @@ export function EggPage() {
         return;
     }
   }
+
+  // The key listener is registered once; it always calls this render's run.
+  const runRef = useRef(run);
+  runRef.current = run;
 
   const refocus = () => setTimeout(() => rootRef.current?.focus(), 0);
   const large = mode === "large" && selected?.status === "done" ? selected : null;
