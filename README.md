@@ -109,16 +109,41 @@ thread's storage.
 
 ## Generated pages are untrusted
 
-A view is written by a model that has just read arbitrary files. egg shows
-each one in an iframe with `srcdoc` and an empty `sandbox` attribute (no
-scripts, no same origin, no forms, no popups), and the document starts with
-a Content-Security-Policy that blocks every network request. Meta refreshes,
-`<link>` tags and link targets are taken out before it is shown. A view
-cannot reach bb's page, its storage, its cookies, or the network.
+A view is written by a model that has just read arbitrary files, and a
+hostile file can tell it what to write. egg treats every view as untrusted,
+with three barriers so that none is the only one:
 
-`node scripts/sandbox-check.mjs` proves it in headless Chrome with a view
-that tries parent access, cookies, storage, fetch, XHR, beacons, sockets,
-images, stylesheets and a refresh.
+- **An allowlist.** egg parses the view with the browser's own parser into
+  an inert document and writes back only allowlisted elements and
+  attributes: text structure, tables, lists, details, inline SVG shapes and
+  text, and styles. Every `meta`, `link`, `base`, `script`, frame, object,
+  form and `on*` attribute goes, and so does every attribute that holds an
+  address (`href`, `src`, `action`, …) except an image's `data:` source. A
+  link keeps its text, with its address as a tooltip. In CSS, `@import` and
+  any `url()` that is not `data:` are made invalid.
+- **A sandboxed frame with a strict policy.** The view is shown in an iframe
+  with `srcdoc` and an empty `sandbox` attribute (no scripts, no same
+  origin, no forms, no popups), and its document starts with a
+  Content-Security-Policy that blocks every request.
+- **An outer frame.** That iframe sits inside a second one written by egg,
+  whose policy has `frame-src 'none'`. A frame navigating itself (a
+  clicked link) is not stopped by its own policy, but Chrome checks it
+  against the parent's, so the navigation is blocked before any request.
+
+A view cannot reach bb's page, its storage, its cookies, or the network.
+One limit: on a mouse press on an `https:` link, Chrome opens a connection
+to the link's host (a preconnect) even when the navigation is blocked. No
+request is sent, but the host name is looked up. Only the allowlist stops
+this, by leaving no addresses in the view.
+
+`node scripts/sandbox-check.mjs` proves all of this in headless Chrome. One
+view tries parent access, cookies, storage, fetch, XHR, beacons, sockets,
+images, stylesheets and a refresh. Then each view in `test/hostile.ts`
+(attribute tricks, meta refreshes, SVG links, image maps, forms, `<base>`,
+prefetches, CSS `url()` and `@import`, encoded addresses, parser
+confusion) is shown three ways: as shipped, with only the frames, and with
+only the allowlist. Every element in it gets a real click. A local listener
+must see no request.
 
 ## Settings
 

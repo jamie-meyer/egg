@@ -29,6 +29,7 @@
     "@get-bb/plugin-sdk": "0.6.132",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "linkedom": "^0.18.15",
     "typescript": "^5.7.0"
   }
 }
