@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commandFor, holdKeyCode, isEditable, moveOnTable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "../src/keys.ts";
+import { LEGEND, commandFor, holdKeyCode, isEditable, liveMarks, moveOnTable, moveSelection, pasteAction, pickAt, selectionFor, tableRows, toggleMark } from "../src/keys.ts";
 
 test("table keys", () => {
   assert.deepEqual(commandFor({ key: "h" }, "table"), { kind: "move", dx: -1, dy: 0 });
@@ -100,4 +100,36 @@ test("h and l read the cards in order across the grid's rows", () => {
   assert.deepEqual(pickAt(sel, rows, 2), { kept: true, index: 1 }, "the kept strip is its own row");
   sel = moveOnTable(selectionFor(false, 0, rows, 2), rows, 2, 0, 1);
   assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 2 }, "j goes straight down");
+});
+
+test("slice 2 keys: m v c x z - p on the table and large; D and u in the room list; compare", () => {
+  for (const mode of ["table", "large"] as const) {
+    assert.deepEqual(commandFor({ key: "m" }, mode), { kind: "more" });
+    assert.deepEqual(commandFor({ key: "v" }, mode), { kind: "mark" });
+    assert.deepEqual(commandFor({ key: "c" }, mode), { kind: "compare" });
+    assert.deepEqual(commandFor({ key: "x" }, mode), { kind: "cross" });
+    assert.deepEqual(commandFor({ key: "z" }, mode), { kind: "zoom" });
+    assert.deepEqual(commandFor({ key: "-" }, mode), { kind: "up" });
+    assert.deepEqual(commandFor({ key: "p" }, mode), { kind: "pin" });
+  }
+  assert.deepEqual(commandFor({ key: "D" }, "rooms"), { kind: "delete-room" });
+  assert.deepEqual(commandFor({ key: "u" }, "rooms"), { kind: "undo" });
+  assert.equal(commandFor({ key: "d" }, "rooms"), null, "lower-case d does not delete a room");
+  assert.deepEqual(commandFor({ key: "Escape" }, "compare"), { kind: "close" });
+  assert.deepEqual(commandFor({ key: "x" }, "compare"), { kind: "cross" });
+  assert.deepEqual(commandFor({ key: "b" }, "compare"), { kind: "built-from" });
+  assert.equal(commandFor({ key: "y" }, "compare"), null);
+});
+
+test("marks: v toggles, two at most, a third replaces the older", () => {
+  assert.deepEqual(toggleMark([], "a"), ["a"]);
+  assert.deepEqual(toggleMark(["a"], "b"), ["a", "b"]);
+  assert.deepEqual(toggleMark(["a", "b"], "c"), ["b", "c"]);
+  assert.deepEqual(toggleMark(["a", "b"], "a"), ["b"]);
+  assert.deepEqual(liveMarks(["a", "b", "c"], { a: { status: "done" }, b: { status: "running" } }), ["a"]);
+});
+
+test("every key in the legend is one the page answers", () => {
+  const all = LEGEND.flatMap((g) => g.keys.map(([k]) => k));
+  for (const k of ["m", "v", "c", "x", "z", "-", "p", "D"]) assert.ok(all.includes(k), `${k} in the legend`);
 });

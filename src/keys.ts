@@ -1,7 +1,7 @@
 // The keys: what each means in each mode, how the selection moves over the
 // table, and what a paste does. Pure, so it is tested without a page.
 
-export type Mode = "table" | "large" | "rooms" | "legend";
+export type Mode = "table" | "large" | "compare" | "rooms" | "legend";
 
 export type Command =
   | { kind: "move"; dx: -1 | 0 | 1; dy: -1 | 0 | 1 }
@@ -18,7 +18,15 @@ export type Command =
   | { kind: "input" }
   | { kind: "rooms" }
   | { kind: "new-room" }
-  | { kind: "legend" };
+  | { kind: "legend" }
+  | { kind: "more" }
+  | { kind: "mark" }
+  | { kind: "compare" }
+  | { kind: "cross" }
+  | { kind: "zoom" }
+  | { kind: "up" }
+  | { kind: "pin" }
+  | { kind: "delete-room" };
 
 export interface KeyLike {
   key: string;
@@ -47,11 +55,22 @@ export function commandFor(event: KeyLike, mode: Mode): Command | null {
         return { kind: "close" };
       case "n":
         return { kind: "new-room" };
+      case "D":
+        return { kind: "delete-room" };
+      case "u":
+        return { kind: "undo" };
       case "?":
         return { kind: "legend" };
       default:
         return null;
     }
+  }
+  if (mode === "compare") {
+    if (k === "Escape" || k === "q" || k === "c") return { kind: "close" };
+    if (k === "b") return { kind: "built-from" };
+    if (k === "x") return { kind: "cross" };
+    if (k === "?") return { kind: "legend" };
+    return null;
   }
   switch (k) {
     case "h":
@@ -97,9 +116,37 @@ export function commandFor(event: KeyLike, mode: Mode): Command | null {
       return { kind: "new-room" };
     case "?":
       return { kind: "legend" };
+    case "m":
+      return { kind: "more" };
+    case "v":
+      return { kind: "mark" };
+    case "c":
+      return { kind: "compare" };
+    case "x":
+      return { kind: "cross" };
+    case "z":
+      return { kind: "zoom" };
+    case "-":
+      return { kind: "up" };
+    case "p":
+      return { kind: "pin" };
     default:
       return null;
   }
+}
+
+/**
+ * v on a view: mark it, or unmark it if marked. At most two marks; a third
+ * replaces the older. The first of the two is A in a cross, the second B.
+ */
+export function toggleMark(marks: readonly string[], viewId: string): string[] {
+  if (marks.includes(viewId)) return marks.filter((m) => m !== viewId);
+  return [...marks, viewId].slice(-2);
+}
+
+/** Marks still pointing at views that exist and have a view to show. */
+export function liveMarks(marks: readonly string[], views: Record<string, { status: string }>): string[] {
+  return marks.filter((m) => views[m]?.status === "done");
 }
 
 /** True when the focused element takes text, so page keys must stay out of its way. */
@@ -235,9 +282,22 @@ export const LEGEND: readonly { title: string; keys: readonly [string, string][]
     ],
   },
   {
+    title: "Going further (table or kept strip)",
+    keys: [
+      ["m", "more like this: four variations along different named axes"],
+      ["v", "mark or unmark the view (two at most; a third replaces the older)"],
+      ["c", "compare the two marked views large, side by side; Escape closes"],
+      ["x", "cross the two marked views: two views, each part labelled A, B or both"],
+      ["z", "zoom into a part of the view: name it, and a child room starts"],
+      ["-", "up to the parent room, at the view it was zoomed from"],
+      ["p", "pin or unpin the view: the next lines get it as reference"],
+    ],
+  },
+  {
     title: "Rooms",
     keys: [
-      ["r", "the list of rooms, most recent first (j k, Enter)"],
+      ["r", "the list of rooms, child rooms under their parents (j k, Enter)"],
+      ["D", "in the list: delete the room (kept files stay); u undoes"],
       ["n", "a new room: a folder and a first line"],
       ["?", "this legend"],
     ],

@@ -4,8 +4,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, moveOnTable, pasteAction, pickAt, selectionFor, tableRows } from "./keys.ts";
-import { type BuiltFrom, type Line, type Room, type RoomSummary, type Round, type View, keptViews, roundViews } from "./model.ts";
+import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, liveMarks, moveOnTable, pasteAction, pickAt, selectionFor, tableRows, toggleMark } from "./keys.ts";
+import { type BuiltFrom, type Line, type ParentRef, type Room, type RoomSummary, type Round, type View, keptViews, roomTree, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
 import { type VoiceState, clipFile, createHoldToTalk, mediaRecorder } from "./voice.ts";
@@ -60,9 +60,40 @@ function ViewFrame({ content, theme, title, large }: { content: Content | undefi
   );
 }
 
-function BuiltFromList({ entries }: { entries: readonly BuiltFrom[] }) {
-  if (entries.length === 0) return <p className="egg-muted egg-small">Its thread read nothing and ran nothing.</p>;
+const ROLE_WORD: Record<ParentRef["role"], string> = { varied: "varied from", crossed: "crossed from", zoomed: "zoomed from", pinned: "pinned" };
+
+/** Where a parent view lives, in words: its round, and its room when that is another room. */
+export function parentText(p: ParentRef, roomId: string | null): string {
+  const where = p.roomId === roomId ? `round ${p.round}` : `round ${p.round} of "${p.roomSubject.slice(0, 60)}"`;
+  return `${p.label ? `${p.label}: ` : ""}"${p.angle}", ${where}`;
+}
+
+function ParentsList({ parents, roomId }: { parents: readonly ParentRef[]; roomId: string | null }) {
+  if (parents.length === 0) return null;
   return (
+    <ul className="egg-built egg-parents" data-egg-parents="">
+      {parents.map((p, i) => (
+        <li key={i} data-egg-parent={p.viewId}>
+          <span className="egg-built-kind">{ROLE_WORD[p.role]}</span>
+          <code title={`room ${p.roomId} · round ${p.roundId} · view ${p.viewId}`}>{parentText(p, roomId)}</code>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function BuiltFromList({ entries, parents = [], roomId = null }: { entries: readonly BuiltFrom[]; parents?: readonly ParentRef[]; roomId?: string | null }) {
+  const from = <ParentsList parents={parents} roomId={roomId} />;
+  if (entries.length === 0)
+    return (
+      <>
+        {from}
+        <p className="egg-muted egg-small">Its thread read nothing and ran nothing.</p>
+      </>
+    );
+  return (
+    <>
+    {from}
     <ul className="egg-built" data-egg-built-from="">
       {entries.map((e, i) => (
         <li key={i} className={e.outside ? "egg-built-outside" : undefined}>
@@ -73,7 +104,22 @@ function BuiltFromList({ entries }: { entries: readonly BuiltFrom[] }) {
         </li>
       ))}
     </ul>
+    </>
   );
+}
+
+/** The card's line naming its parents: the axis of a variation, A × B of a cross. */
+function lineage(view: View): string | null {
+  const parents = view.parents ?? [];
+  const crossed = parents.filter((p) => p.role === "crossed");
+  if (crossed.length === 2) return `${crossed.map((p) => `${p.label}: ${p.angle}`).join(" × ")}${view.axis ? ` · ${view.axis}` : ""}`;
+  const varied = parents.find((p) => p.role === "varied");
+  if (varied) return `axis: ${view.axis ?? "?"} · from "${varied.angle}"`;
+  const zoomed = parents.find((p) => p.role === "zoomed");
+  if (zoomed) return `zoomed from "${zoomed.angle}"`;
+  const pinned = parents.find((p) => p.role === "pinned");
+  if (pinned) return `with pinned "${pinned.angle}"`;
+  return null;
 }
 
 function statusText(view: View, now: number): string {
@@ -94,21 +140,32 @@ function Card(props: {
   onSelect: () => void;
   onOpen: () => void;
   compact?: boolean;
+  mark?: "A" | "B" | null;
+  pinned?: boolean;
+  roomId: string | null;
 }) {
   const { view } = props;
+  const from = lineage(view);
   return (
     <section
       className={`egg-card${props.selected ? " egg-selected" : ""}${props.compact ? " egg-card-compact" : ""} egg-${view.status}`}
       data-egg-card={view.id}
       data-egg-status={view.status}
       data-egg-decision={view.decision ?? ""}
+      data-egg-mark={props.mark ?? ""}
+      data-egg-pinned={props.pinned ? "1" : ""}
+      data-egg-axis={view.axis ?? ""}
       onClick={props.onSelect}
       onDoubleClick={props.onOpen}
     >
       <header className="egg-card-head">
         <span className="egg-angle">{view.angle}</span>
+        <span className="egg-spacer" />
+        {props.mark ? <span className="egg-badge egg-badge-mark" title="marked (v)">{props.mark}</span> : null}
+        {props.pinned ? <span className="egg-badge egg-badge-pin" title="pinned (p)">pinned</span> : null}
         {view.decision === "kept" ? <span className="egg-badge">kept</span> : null}
       </header>
+      {from ? <p className="egg-lineage egg-small" data-egg-lineage="" title={from}>{from}</p> : null}
       {props.compact ? null : <p className="egg-focus egg-muted">{view.focus}</p>}
       <div className="egg-card-body">
         {view.status === "done" ? (
@@ -120,7 +177,7 @@ function Card(props: {
       <footer className="egg-card-foot egg-muted egg-small">
         <span>{statusText(view, props.now)}</span>
       </footer>
-      {props.showBuilt && view.status !== "waiting" ? <BuiltFromList entries={view.builtFrom} /> : null}
+      {props.showBuilt && view.status !== "waiting" ? <BuiltFromList entries={view.builtFrom} parents={view.parents} roomId={props.roomId} /> : null}
     </section>
   );
 }
@@ -146,7 +203,7 @@ function Notebook({ lines, children }: { lines: readonly Line[]; children: React
   );
 }
 
-function LineInput(props: { initial: string; onSend: (text: string) => void; onLeave: () => void }) {
+function LineInput(props: { initial: string; placeholder?: string; mark?: string; onSend: (text: string) => void; onLeave: () => void }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -157,13 +214,13 @@ function LineInput(props: { initial: string; onSend: (text: string) => void; onL
   }, []);
   return (
     <div className="egg-input-row">
-      <span className="egg-line-mark">›</span>
+      <span className="egg-line-mark">{props.mark ?? "›"}</span>
       <input
         ref={ref}
         className="egg-input"
         data-egg-line-input=""
         defaultValue={props.initial}
-        placeholder="a line about the subject; Enter sends, Escape leaves"
+        placeholder={props.placeholder ?? "a line about the subject; Enter sends, Escape leaves"}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
@@ -187,6 +244,8 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
   const [line, setLine] = useState(props.initialLine);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checkouts, setCheckouts] = useState<{ projectId: string; name: string; path: string }[]>([]);
+  const [pick, setPick] = useState(-1);
   const lineRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -194,6 +253,7 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
       (d) => {
         setFolder((f) => f || d.folder || "");
         setProject((p) => p ?? d.projectId);
+        setCheckouts(d.checkouts);
       },
       () => undefined,
     );
@@ -211,7 +271,23 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
       setBusy(false);
     }
   };
+  const choose = (i: number) => {
+    const c = checkouts[i];
+    if (!c) return;
+    setPick(i);
+    setFolder(c.path);
+    setProject(c.projectId);
+  };
   const keys = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Up and Down (or Ctrl-n, Ctrl-p) walk the list of checkouts from either field.
+    const down = e.key === "ArrowDown" || (e.ctrlKey && e.key === "n");
+    const up = e.key === "ArrowUp" || (e.ctrlKey && e.key === "p");
+    if ((down || up) && checkouts.length > 0) {
+      e.preventDefault();
+      const next = pick < 0 ? (down ? 0 : checkouts.length - 1) : (pick + (down ? 1 : -1) + checkouts.length) % checkouts.length;
+      choose(next);
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
       void submit();
@@ -226,13 +302,23 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
       <h2>A new room</h2>
       <label>
         <span className="egg-muted egg-small">Folder to read (read only)</span>
-        <input ref={folderRef} className="egg-input" data-egg-folder="" value={folder} onChange={(e) => setFolder(e.target.value)} onKeyDown={keys} />
+        <input ref={folderRef} className="egg-input" data-egg-folder="" value={folder} onChange={(e) => { setFolder(e.target.value); setPick(-1); }} onKeyDown={keys} />
       </label>
+      {checkouts.length > 0 ? (
+        <ol className="egg-checkouts" data-egg-checkouts="">
+          {checkouts.map((c, i) => (
+            <li key={c.path} className={i === pick ? "egg-selected" : undefined} data-egg-checkout={c.path} onClick={() => choose(i)}>
+              <span>{c.name}</span>
+              <span className="egg-muted egg-small egg-path">{c.path}</span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
       <label>
         <span className="egg-muted egg-small">First line: what you are looking for</span>
         <input ref={lineRef} className="egg-input" data-egg-first-line="" value={line} onChange={(e) => setLine(e.target.value)} onKeyDown={keys} placeholder="where do requests get authenticated?" />
       </label>
-      <p className="egg-muted egg-small">Enter makes the room and starts the first round · Tab between fields · Escape cancels</p>
+      <p className="egg-muted egg-small">Enter makes the room and starts the first round · Up and Down pick a project's checkout · Tab between fields · Escape cancels</p>
       {error ? <p className="egg-trouble">{error}</p> : null}
       {busy ? <p className="egg-muted">Making the room…</p> : null}
     </div>
@@ -277,7 +363,12 @@ export function EggPage() {
   const [roomId, setRoomId] = useState<string | null>(() => localStorage.getItem(LAST_ROOM));
   const [mode, setMode] = useState<Mode>("table");
   const [creating, setCreating] = useState<{ line: string } | null>(null);
-  const [input, setInput] = useState<{ text: string; key: number; source: "typed" | "pasted" } | null>(null);
+  const [input, setInput] = useState<{ text: string; key: number; source: "typed" | "pasted"; zoom?: { viewId: string; angle: string } } | null>(null);
+  const [marks, setMarks] = useState<string[]>([]);
+  /** After going up (-): the view to land on once the parent room is open. */
+  const land = useRef<string | null>(null);
+  /** Rooms deleted while the list is open, newest last, for u. */
+  const deletedRooms = useRef<string[]>([]);
   const [roundIndex, setRoundIndex] = useState<number | null>(null);
   const [sel, setSel] = useState<Selection>({ row: 0, col: 0 });
   const [roomSel, setRoomSel] = useState(0);
@@ -365,14 +456,15 @@ export function EggPage() {
   // Fetch the content of every finished view on screen.
   useEffect(() => {
     if (!room) return;
-    const need = [...cards, ...kept].filter((v) => v.status === "done" && !contents[v.id]);
+    const marked = marks.map((m) => room.views[m]).filter((v): v is View => v !== undefined);
+    const need = [...cards, ...kept, ...marked].filter((v) => v.status === "done" && !contents[v.id]);
     for (const v of need) {
       rpc.call("view_content", { roomId: room.id, viewId: v.id }).then(
         (c) => c && setContents((all) => ({ ...all, [v.id]: c })),
         () => undefined,
       );
     }
-  }, [room, cards, kept]);
+  }, [room, cards, kept, marks]);
 
   // A new round arriving takes the table to it.
   const roundCount = rounds.length;
@@ -380,6 +472,26 @@ export function EggPage() {
     setRoundIndex(null);
     setSel({ row: 0, col: 0 });
   }, [roundCount, room?.id]);
+  useEffect(() => setMarks([]), [room?.id]);
+  // Landing after going up: show the round the view is in and select it.
+  useEffect(() => {
+    const target = land.current;
+    if (!room || !target) return;
+    land.current = null;
+    const view = room.views[target];
+    if (!view) return;
+    const keptAt = keptViews(room).findIndex((v) => v.id === target);
+    const ri = room.rounds.findIndex((r) => r.id === view.roundId);
+    const r = room.rounds[ri];
+    const onTable = r ? roundViews(room, r).filter((v) => v.decision !== "dropped") : [];
+    const idx = onTable.findIndex((v) => v.id === target);
+    if (ri >= 0 && idx >= 0) {
+      setRoundIndex(ri);
+      setSel(selectionFor(false, idx, tableRows(onTable.length, cols, keptViews(room).length), cols));
+    } else if (keptAt >= 0) {
+      setSel(selectionFor(true, keptAt, tableRows(cards.length, cols, keptViews(room).length), cols));
+    }
+  }, [room?.id]);
 
   const flash = (text: string) => {
     setHint(text);
@@ -439,7 +551,8 @@ export function EggPage() {
   );
 
   // Keys and paste. Only when focus is on this page (or nowhere), never in a text field.
-  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings };
+  const tree = useMemo(() => roomTree(rooms), [rooms]);
+  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings, marks, tree };
   const live = useRef(state);
   live.current = state;
   useEffect(() => {
@@ -504,7 +617,7 @@ export function EggPage() {
     const s = live.current;
     switch (command.kind) {
       case "move":
-        if (s.mode === "rooms") setRoomSel((i) => Math.max(0, Math.min(s.rooms.length - 1, i + command.dy)));
+        if (s.mode === "rooms") setRoomSel((i) => Math.max(0, Math.min(s.tree.length - 1, i + command.dy)));
         else setSel(moveOnTable(s.current, s.rowLengths, s.cols, command.dx, command.dy));
         return;
       case "first":
@@ -515,7 +628,7 @@ export function EggPage() {
         return;
       case "open":
         if (s.mode === "rooms") {
-          const target = s.rooms[s.roomSel];
+          const target = s.tree[s.roomSel]?.room;
           if (target) {
             setRoom(null);
             setRoomId(target.id);
@@ -524,6 +637,7 @@ export function EggPage() {
         } else if (s.selected?.status === "done") setMode("large");
         return;
       case "close":
+        if (s.mode === "rooms") deletedRooms.current = [];
         setMode("table");
         return;
       case "keep":
@@ -536,6 +650,18 @@ export function EggPage() {
         }
         return;
       case "undo": {
+        if (s.mode === "rooms") {
+          const id = deletedRooms.current.pop();
+          if (!id) return flash("Nothing to undo.");
+          rpc.call("room_restore", { roomId: id }).then(
+            (r) => {
+              if (!r.restored) flash("That room could not be put back.");
+              loadRooms();
+            },
+            (e) => flash(errText(e)),
+          );
+          return;
+        }
         const last = undo.current.pop();
         const r = s.room;
         if (!last || !r || last.roomId !== r.id || !r.views[last.viewId]) return flash("Nothing to undo.");
@@ -556,11 +682,93 @@ export function EggPage() {
         if (!s.room) setCreating({ line: "" });
         else setInput({ text: "", key: Date.now(), source: "typed" });
         return;
-      case "rooms":
+      case "rooms": {
         loadRooms();
-        setRoomSel(0);
+        deletedRooms.current = [];
+        const here = s.tree.findIndex((t) => t.room.id === s.room?.id);
+        setRoomSel(Math.max(0, here));
         setMode("rooms");
         return;
+      }
+      case "delete-room": {
+        const target = s.tree[s.roomSel]?.room;
+        if (!target) return;
+        deletedRooms.current.push(target.id);
+        // Instant: off the list now; the server archives the threads.
+        setRooms((all) => all.filter((r) => r.id !== target.id));
+        setRoomSel((i) => Math.max(0, Math.min(i, s.tree.length - 2)));
+        if (s.room?.id === target.id) {
+          setRoom(null);
+          setRoomId(null);
+          localStorage.removeItem(LAST_ROOM);
+        }
+        rpc.call("room_delete", { roomId: target.id }).then(
+          () => loadRooms(),
+          (e) => {
+            flash(errText(e));
+            loadRooms();
+          },
+        );
+        flash(`Deleted "${target.subject.slice(0, 40)}": u undoes`);
+        return;
+      }
+      case "more": {
+        const v = s.selected;
+        if (!s.room || !v) return;
+        if (v.status !== "done") return flash("That view is not ready yet.");
+        setMode("table");
+        rpc.call("more", { roomId: s.room.id, viewId: v.id }).catch((e) => flash(errText(e)));
+        return;
+      }
+      case "mark": {
+        const v = s.selected;
+        if (!v) return;
+        if (v.status !== "done") return flash("Only a finished view can be marked.");
+        setMarks((m) => toggleMark(m, v.id));
+        return;
+      }
+      case "compare": {
+        const live = s.room ? liveMarks(s.marks, s.room.views) : [];
+        if (live.length < 2) return flash("Mark two views with v first.");
+        setMode("compare");
+        return;
+      }
+      case "cross": {
+        const live = s.room ? liveMarks(s.marks, s.room.views) : [];
+        if (!s.room || live.length < 2) return flash("Mark two views with v first.");
+        setMode("table");
+        setMarks([]);
+        rpc.call("cross", { roomId: s.room.id, a: live[0]!, b: live[1]! }).catch((e) => flash(errText(e)));
+        return;
+      }
+      case "zoom": {
+        const v = s.selected;
+        if (!s.room || !v) return;
+        if (v.status !== "done") return flash("That view is not ready yet.");
+        setMode("table");
+        setInput({ text: "", key: Date.now(), source: "typed", zoom: { viewId: v.id, angle: v.angle } });
+        return;
+      }
+      case "up": {
+        const parent = s.room?.parent;
+        if (!parent) return flash("This room has no parent room.");
+        land.current = parent.viewId;
+        setMode("table");
+        setRoom(null);
+        setRoomId(parent.roomId);
+        return;
+      }
+      case "pin": {
+        const v = s.selected;
+        if (!s.room || !v) return;
+        const unpin = s.room.pin?.viewId === v.id;
+        if (!unpin && v.status !== "done") return flash("Only a finished view can be pinned.");
+        rpc.call("pin", { roomId: s.room.id, viewId: unpin ? null : v.id }).then(
+          (r) => setRoom((cur) => (cur && cur.id === r.room.id ? r.room : cur)),
+          (e) => flash(errText(e)),
+        );
+        return;
+      }
       case "new-room":
         setMode("table");
         setCreating({ line: "" });
@@ -577,6 +785,13 @@ export function EggPage() {
 
   const refocus = () => setTimeout(() => rootRef.current?.focus(), 0);
   const large = mode === "large" && selected?.status === "done" ? selected : null;
+  const shownMarks = room ? liveMarks(marks, room.views) : [];
+  const markOf = (viewId: string): "A" | "B" | null => {
+    const i = shownMarks.indexOf(viewId);
+    return i === 0 ? "A" : i === 1 ? "B" : null;
+  };
+  const compared = mode === "compare" && room && shownMarks.length === 2 ? shownMarks.map((m) => room.views[m]!) : null;
+  const roundOf = (v: View) => room?.rounds.find((r) => r.id === v.roundId);
 
   return (
     <div className="egg" ref={rootRef} tabIndex={-1} data-egg-root="" data-egg-mode={mode} data-egg-voice={voice}>
@@ -588,6 +803,16 @@ export function EggPage() {
             <span className="egg-subject" data-egg-subject="">{room.subject}</span>
             <span className="egg-muted egg-small egg-path" title={room.folder}>reads {room.folder}</span>
             <span className="egg-muted egg-small egg-path" data-egg-room-dir="" title={room.dir}>keeps to {room.dir}</span>
+            {room.parent ? (
+              <span className="egg-muted egg-small egg-path" data-egg-parent-room={room.parent.roomId} title={room.parent.roomSubject}>
+                <kbd>-</kbd> up to "{room.parent.roomSubject}"
+              </span>
+            ) : null}
+            {room.pin ? (
+              <span className="egg-small egg-pin" data-egg-pin={room.pin.viewId}>
+                pinned: "{room.pin.angle}" (round {room.pin.round})
+              </span>
+            ) : null}
           </>
         ) : (
           <span className="egg-muted egg-small">rooms in {roomsDir}</span>
@@ -610,10 +835,21 @@ export function EggPage() {
             <LineInput
               key={input.key}
               initial={input.text}
+              {...(input.zoom ? { placeholder: `zoom into… which part of "${input.zoom.angle}"? Enter makes a child room, Escape leaves`, mark: "⌕" } : {})}
               onSend={(text) => {
                 setInput(null);
                 refocus();
-                void send(text, input.source);
+                if (input.zoom) {
+                  const from = input.zoom;
+                  rpc.call("zoom", { roomId: room.id, viewId: from.viewId, part: text, source: input.source }).then(
+                    (r) => {
+                      setRoom(r.room);
+                      setRoomId(r.room.id);
+                      loadRooms();
+                    },
+                    (e) => flash(`Could not zoom: ${errText(e)}`),
+                  );
+                } else void send(text, input.source);
               }}
               onLeave={() => {
                 setInput(null);
@@ -650,6 +886,9 @@ export function EggPage() {
                         theme={theme}
                         showBuilt={showBuilt}
                         now={now}
+                        mark={markOf(v.id)}
+                        pinned={room.pin?.viewId === v.id}
+                        roomId={room.id}
                         onSelect={() => select(false, i)}
                         onOpen={() => {
                           select(false, i);
@@ -682,6 +921,9 @@ export function EggPage() {
                     theme={theme}
                     showBuilt={false}
                     now={now}
+                    mark={markOf(v.id)}
+                    pinned={room.pin?.viewId === v.id}
+                    roomId={room.id}
                     onSelect={() => select(true, i)}
                     onOpen={() => {
                       select(true, i);
@@ -700,6 +942,7 @@ export function EggPage() {
         <div className="egg-large" data-egg-large={large.id}>
           <header className="egg-card-head">
             <span className="egg-angle">{large.angle}</span>
+            {lineage(large) ? <span className="egg-lineage egg-small">{lineage(large)}</span> : null}
             <span className="egg-muted egg-small">{large.focus}</span>
             <span className="egg-spacer" />
             <span className="egg-muted egg-small">
@@ -711,9 +954,39 @@ export function EggPage() {
             {showBuilt ? (
               <aside className="egg-large-built">
                 <h3>Built from</h3>
-                <BuiltFromList entries={large.builtFrom} />
+                <BuiltFromList entries={large.builtFrom} parents={large.parents} roomId={room?.id ?? null} />
               </aside>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {compared ? (
+        <div className="egg-large egg-compare" data-egg-compare="">
+          <header className="egg-card-head">
+            <span className="egg-angle">Compare</span>
+            <span className="egg-spacer" />
+            <span className="egg-muted egg-small">
+              <kbd>x</kbd> cross them <kbd>b</kbd> built from <kbd>Esc</kbd> close
+            </span>
+          </header>
+          <div className="egg-compare-body">
+            {compared.map((v, i) => (
+              <section key={v.id} className="egg-compare-side" data-egg-compare-side={v.id}>
+                <header className="egg-card-head">
+                  <span className="egg-badge egg-badge-mark">{i === 0 ? "A" : "B"}</span>
+                  <span className="egg-angle">{v.angle}</span>
+                  <span className="egg-muted egg-small">round {roundOf(v)?.n ?? "?"} · {roundOf(v)?.line}</span>
+                </header>
+                {lineage(v) ? <p className="egg-lineage egg-small">{lineage(v)}</p> : null}
+                <ViewFrame content={contents[v.id]} theme={theme} title={v.angle} large />
+                {showBuilt ? (
+                  <div className="egg-compare-built">
+                    <BuiltFromList entries={v.builtFrom} parents={v.parents} roomId={room?.id ?? null} />
+                  </div>
+                ) : null}
+              </section>
+            ))}
           </div>
         </div>
       ) : null}
@@ -723,16 +996,23 @@ export function EggPage() {
           <h2>Rooms</h2>
           {rooms.length === 0 ? <p className="egg-muted">None yet. n makes one.</p> : null}
           <ol className="egg-room-list">
-            {rooms.map((r, i) => (
-              <li key={r.id} className={i === roomSel ? "egg-selected" : undefined} data-egg-room={r.id} onClick={() => { setRoomId(r.id); setMode("table"); }}>
-                <span>{r.subject}</span>
+            {tree.map(({ room: r, depth }, i) => (
+              <li
+                key={r.id}
+                className={i === roomSel ? "egg-selected" : undefined}
+                data-egg-room={r.id}
+                data-egg-depth={depth}
+                style={{ paddingLeft: 8 + depth * 22 }}
+                onClick={() => { setRoomId(r.id); setMode("table"); }}
+              >
+                <span>{depth > 0 ? <span className="egg-muted">↳ </span> : null}{r.subject}</span>
                 <span className="egg-muted egg-small">
                   {r.folder} · {r.rounds} round{r.rounds === 1 ? "" : "s"} · {r.kept} kept
                 </span>
               </li>
             ))}
           </ol>
-          <p className="egg-muted egg-small">j k move · Enter opens · n new room · Escape closes</p>
+          <p className="egg-muted egg-small">j k move · Enter opens · D deletes (kept files stay) · u undoes · n new room · Escape closes</p>
         </div>
       ) : null}
       {mode === "legend" ? <Legend /> : null}

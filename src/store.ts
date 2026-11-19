@@ -6,9 +6,12 @@ import { randomUUID } from "node:crypto";
 import {
   type BuiltFrom,
   type Line,
+  type ParentRef,
   type Room,
+  type RoundKind,
   type Round,
   type View,
+  parentRef,
   roomSchema,
   roundViews,
 } from "./model.ts";
@@ -25,6 +28,10 @@ export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g,
 
 const roomKey = (id: string) => `room:${id}`;
 const contentKey = (viewId: string) => `content:${viewId}`;
+const deletedKey = (id: string) => `deleted:${id}`;
+const LAST_FOLDER = "meta:last-folder";
+/** Deleted rooms are kept this long (for undo), then forgotten. */
+const DELETED_KEEP_MS = 7 * 24 * 3600 * 1000;
 /** A view's content is capped well under the store's 256 KB value limit. */
 export const MAX_CONTENT = 200_000;
 
@@ -66,6 +73,41 @@ export function createStore(kv: Kv) {
       const keys = await kv.list("room:");
       const rooms = await Promise.all(keys.map((key) => get(key.slice("room:".length))));
       return rooms.filter((r): r is Room => r !== null).sort((a, b) => b.updatedAt - a.updatedAt);
+    },
+    /** Take a room out of egg; it can be put back with `restore`. Its view contents stay. */
+    async remove(roomId: string): Promise<Room | null> {
+      const previous = chains.get(roomId) ?? Promise.resolve();
+      const next = previous.then(async () => {
+        const room = await get(roomId);
+        if (room === null) return null;
+        await kv.set(deletedKey(roomId), { at: Date.now(), room });
+        await kv.delete(roomKey(roomId));
+        return room;
+      });
+      chains.set(roomId, next.catch(() => undefined));
+      const room = await next;
+      // Forget rooms deleted long ago.
+      const now = Date.now();
+      for (const key of await kv.list("deleted:")) {
+        const entry = await kv.get<{ at?: number }>(key);
+        if (!entry || typeof entry.at !== "number" || now - entry.at > DELETED_KEEP_MS) await kv.delete(key);
+      }
+      return room;
+    },
+    async restore(roomId: string): Promise<Room | null> {
+      const entry = await kv.get<{ room?: unknown }>(deletedKey(roomId));
+      const parsed = roomSchema.safeParse(entry?.room);
+      if (!parsed.success) return null;
+      await kv.set(roomKey(roomId), parsed.data);
+      await kv.delete(deletedKey(roomId));
+      return parsed.data;
+    },
+    async lastFolder(): Promise<{ folder: string; projectId: string | null } | null> {
+      const v = await kv.get<{ folder?: unknown; projectId?: unknown }>(LAST_FOLDER);
+      return v && typeof v.folder === "string" ? { folder: v.folder, projectId: typeof v.projectId === "string" ? v.projectId : null } : null;
+    },
+    async setLastFolder(folder: string, projectId: string | null): Promise<void> {
+      await kv.set(LAST_FOLDER, { folder, projectId });
     },
     async putContent(viewId: string, value: ViewContent): Promise<void> {
       await kv.set(contentKey(viewId), { format: value.format, content: value.content.slice(0, MAX_CONTENT) });
@@ -112,14 +154,29 @@ export function addLine(room: Room, line: Omit<Line, "id" | "at"> & { at?: numbe
   return full;
 }
 
-/** A said line starts a new round, which supersedes the one before it. */
+/**
+ * A said line (or m, x, a zoom) starts a new round, which supersedes the one
+ * before it. A plain line takes the room's pin, if any, as a parent.
+ */
 export function startRound(
   room: Room,
-  input: { text: string; source: "typed" | "voice" | "pasted"; plannerModel: string; now?: number },
+  input: {
+    text: string;
+    source: "typed" | "voice" | "pasted" | "key";
+    plannerModel: string;
+    kind?: RoundKind;
+    parents?: ParentRef[];
+    now?: number;
+  },
 ): { round: Round; superseded: View[] } {
   const now = input.now ?? Date.now();
   const roundId = newId("rd");
+  const kind = input.kind ?? "line";
+  const parents = [...(input.parents ?? [])];
+  if ((kind === "line" || kind === "zoom") && room.pin) parents.push({ ...room.pin, role: "pinned" });
   const line = addLine(room, { kind: "said", text: input.text, source: input.source, roundId, at: now });
+  const pinned = parents.find((p) => p.role === "pinned");
+  if (pinned) addLine(room, { kind: "did", text: `with pinned "${pinned.angle}" (round ${pinned.round}) as reference`, roundId, at: now });
   const superseded = supersede(room);
   const round: Round = {
     id: roundId,
@@ -129,6 +186,8 @@ export function startRound(
     at: now,
     status: "planning",
     plannerModel: input.plannerModel,
+    kind,
+    ...(parents.length ? { parents } : {}),
     planNote: null,
     viewIds: [],
   };
@@ -152,12 +211,15 @@ export function setAngles(room: Room, roundId: string, angles: readonly Angle[],
   const round = findRound(room, roundId);
   round.status = "running";
   round.planNote = planNote;
+  const parents = round.parents ?? [];
   const views = angles.map((angle, slot): View => ({
     id: newId("vw"),
     roundId,
     slot,
     angle: angle.name,
     focus: angle.focus,
+    ...(angle.axis ? { axis: angle.axis } : {}),
+    ...(parents.length ? { parents: parents.map((p) => ({ ...p })) } : {}),
     model,
     threadId: null,
     status: "waiting",
@@ -219,6 +281,21 @@ export function decide(room: Room, viewId: string, decision: "kept" | "dropped" 
   const before = view.decision;
   view.decision = decision;
   return before;
+}
+
+/** Pin a view as context for the next lines, or (null) unpin. One pin at a time. */
+export function setPin(room: Room, viewId: string | null): ParentRef | null {
+  const before = room.pin ?? null;
+  if (viewId === null) {
+    room.pin = null;
+    if (before) addLine(room, { kind: "did", text: `Unpinned "${before.angle}"` });
+    return null;
+  }
+  const view = findView(room, viewId);
+  const pin = parentRef(room, view, "pinned");
+  room.pin = pin;
+  addLine(room, { kind: "did", text: `Pinned "${view.angle}" (round ${pin.round}): the next lines get it as reference` });
+  return pin;
 }
 
 export function findView(room: Room, viewId: string): View {

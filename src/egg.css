@@ -221,3 +221,23 @@
 .egg-legend-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 2px 0; font-size: 13px; }
 .egg-legend dd { margin: 0; }
 .egg-large-built .egg-built code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Slice 2: lineage, marks, pin, compare, checkouts. */
+.egg-lineage { margin: 2px 10px 0; color: var(--egg-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.egg-large .egg-lineage { margin: 0; }
+.egg-badge-mark { color: var(--egg-accent); font-weight: 700; }
+.egg-badge-pin { color: var(--egg-accent); }
+.egg-pin { color: var(--egg-accent); }
+.egg-parents { border-top: 0; padding-bottom: 0; }
+.egg-large-built .egg-parents { margin-bottom: 8px; }
+.egg-compare-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 16px 16px; }
+.egg-compare-side { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 4px; }
+.egg-compare-side .egg-card-head { padding: 0 0 4px; }
+.egg-compare-side .egg-frame-large { flex: 1 1 auto; min-height: 0; }
+.egg-compare-built { max-height: 30%; overflow-y: auto; }
+.egg-compare-built .egg-built { max-height: none; }
+.egg-checkouts { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow-y: auto; border: 1px solid var(--egg-rule); border-radius: 6px; }
+.egg-checkouts li { display: flex; gap: 10px; align-items: baseline; padding: 3px 8px; cursor: default; min-width: 0; }
+.egg-checkouts li .egg-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egg-checkouts li.egg-selected { background: var(--egg-bg2); box-shadow: inset 2px 0 0 var(--egg-accent); }
+.egg-compare-side .egg-frame-large { height: auto; }

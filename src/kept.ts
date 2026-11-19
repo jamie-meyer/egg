@@ -35,11 +35,23 @@ export function keptBaseName(round: Round, view: View): string {
 }
 
 export interface KeptRecord {
-  room: { id: string; subject: string; folder: string };
+  room: {
+    id: string;
+    subject: string;
+    folder: string;
+    /** For a child room: the room and view it was zoomed from. */
+    parent: { roomId: string; subject: string; roundId: string; viewId: string; angle: string } | null;
+  };
   line: string;
   round: number;
+  /** line, more (a variation), cross or zoom. */
+  kind: string;
   angle: string;
+  /** A variation's axis or a cross's way of combining. */
+  axis: string | null;
   focus: string;
+  /** The views it was derived from: room, round, view, and how each was used. */
+  parents: { roomId: string; roomSubject: string; round: number; roundId: string; viewId: string; angle: string; label: "A" | "B" | null; role: string }[];
   model: string;
   keptAt: string;
   builtAt: string | null;
@@ -49,11 +61,30 @@ export interface KeptRecord {
 
 export function keptRecord(room: Room, round: Round, view: View, file: string, now: number): KeptRecord {
   return {
-    room: { id: room.id, subject: room.subject, folder: room.folder },
+    room: {
+      id: room.id,
+      subject: room.subject,
+      folder: room.folder,
+      parent: room.parent
+        ? { roomId: room.parent.roomId, subject: room.parent.roomSubject, roundId: room.parent.roundId, viewId: room.parent.viewId, angle: room.parent.angle }
+        : null,
+    },
     line: round.line,
     round: round.n,
+    kind: round.kind ?? "line",
     angle: view.angle,
+    axis: view.axis ?? null,
     focus: view.focus,
+    parents: (view.parents ?? []).map((p) => ({
+      roomId: p.roomId,
+      roomSubject: p.roomSubject,
+      round: p.round,
+      roundId: p.roundId,
+      viewId: p.viewId,
+      angle: p.angle,
+      label: p.label ?? null,
+      role: p.role,
+    })),
     model: view.model,
     keptAt: new Date(now).toISOString(),
     builtAt: view.finishedAt === null ? null : new Date(view.finishedAt).toISOString(),

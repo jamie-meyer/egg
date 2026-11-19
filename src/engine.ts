@@ -2,10 +2,12 @@
 // what each wrote and what it did, keeping and dropping, and archiving
 // threads that are no longer on the table.
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { Room, View } from "./model.ts";
-import { removeKept, roomDir, writeKept } from "./kept.ts";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { type ParentRef, type Room, type Round, type RoundKind, type View, parentRef } from "./model.ts";
+import { removeKept, roomDir, slug, writeKept } from "./kept.ts";
 import { builtFromCount, builtFromEvents, collectEvents, type EventRow } from "./provenance.ts";
-import { FALLBACK_ANGLES, parseAngles, plannerPrompt, viewPrompt, viewThreadTitle } from "./rounds.ts";
+import { type Angle, type Reference, type RoundSpec, fallbackFor, parseAngles, plannerPrompt, viewPrompt, viewThreadTitle } from "./rounds.ts";
 import {
   type Store,
   addLine,
@@ -16,7 +18,9 @@ import {
   makeRoom,
   newId,
   setAngles,
+  setPin,
   startRound,
+  supersede,
   viewFinished,
   viewStarted,
 } from "./store.ts";
@@ -49,6 +53,14 @@ export function readMark(value: unknown): ThreadMark | null {
 }
 
 const PLANNER_TIMEOUT_MS = 90_000;
+
+/** The notebook line once a round's angles are picked. */
+export function plannedLine(kind: RoundKind, views: readonly View[], ms: number): string {
+  const took = `${Math.round(ms / 1000)} s`;
+  if (kind === "more") return `Four axes in ${took}: ${views.map((v) => `${v.axis ?? "?"} → ${v.angle}`).join(" · ")}`;
+  if (kind === "cross") return `Two ways in ${took}: ${views.map((v) => `${v.axis ?? "?"} → ${v.angle}`).join(" · ")}`;
+  return `Four angles in ${took}: ${views.map((v) => v.angle).join(" · ")}`;
+}
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500);
 const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
 
@@ -127,23 +139,152 @@ export function createEngine(deps: EngineDeps) {
     room.environmentId = input.environmentId ?? null;
     addLine(room, { kind: "did", text: `Room made: reads ${input.folder}; kept views go to ${room.dir}` });
     await store.put(room);
+    await store.setLastFolder(input.folder, input.projectId).catch(() => undefined);
     const roundId = await say(room.id, input.line, input.source);
     return { room: (await store.get(room.id))!, roundId };
   }
 
   /** A line from the person: start a round for it. Returns the round id at once; the round runs on. */
   async function say(roomId: string, text: string, source: "typed" | "voice" | "pasted"): Promise<string> {
+    return beginRound(roomId, { text, source, kind: "line", parents: [] });
+  }
+
+  /**
+   * Start a round of any kind and let it run on. The room's pin (for a line
+   * or zoom round) is added to its parents by startRound.
+   */
+  async function beginRound(
+    roomId: string,
+    input: { text: string; source: "typed" | "voice" | "pasted" | "key"; kind: RoundKind; parents: ParentRef[] },
+  ): Promise<string> {
     const settings = await deps.settings();
     const { room, result } = await store.update(roomId, (r) =>
-      startRound(r, { text, source, plannerModel: settings.plannerModel }),
+      startRound(r, { ...input, plannerModel: settings.plannerModel }),
     );
     publish(roomId);
     for (const view of result.superseded) if (view.threadId) void archiveThread(view.threadId);
-    void runRound(room, result.round.id, settings).catch(async (e) => {
+    void (async () => {
+      const spec = await specFor(room, result.round);
+      await runRound(room, result.round.id, settings, spec);
+    })().catch(async (e) => {
       log.warn(`round failed: ${errText(e)}`);
       await note(roomId, "trouble", `The round stopped: ${errText(e)}`, result.round.id).catch(() => undefined);
     });
     return result.round.id;
+  }
+
+  /** A parent view as quoted reference: its room, its round's line, and its content. */
+  async function reference(ref: ParentRef, here: Room): Promise<Reference | null> {
+    const room = ref.roomId === here.id ? here : await store.get(ref.roomId);
+    const content = await store.getContent(ref.viewId);
+    if (!content) return null;
+    const round = room?.rounds.find((r) => r.id === ref.roundId);
+    return {
+      ...(ref.label ? { label: ref.label } : {}),
+      angle: ref.angle,
+      line: round?.line ?? "",
+      round: ref.round,
+      roomSubject: room?.subject ?? ref.roomSubject,
+      format: content.format,
+      content: content.content,
+    };
+  }
+
+  async function specFor(room: Room, round: Round): Promise<RoundSpec> {
+    const parents = round.parents ?? [];
+    const main = parents.filter((p) => p.role !== "pinned").sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
+    const pin = parents.find((p) => p.role === "pinned");
+    const refs = (await Promise.all(main.map((p) => reference(p, room)))).filter((r): r is Reference => r !== null);
+    return {
+      kind: round.kind ?? "line",
+      refs,
+      pinned: pin ? await reference(pin, room) : null,
+      nonce: randomUUID().replace(/-/g, "").slice(0, 16),
+    };
+  }
+
+  /** A done view in a room, or a plain-words error. */
+  async function doneView(roomId: string, viewId: string): Promise<{ room: Room; view: View }> {
+    const room = await store.get(roomId);
+    if (!room) throw new Error("That room is gone.");
+    const view = room.views[viewId];
+    if (!view) throw new Error("That view is not in this room.");
+    if (view.status !== "done") throw new Error(`"${view.angle}" has no view yet.`);
+    return { room, view };
+  }
+
+  /** m: four variations of a view, each along a different named axis. */
+  async function more(roomId: string, viewId: string): Promise<string> {
+    const { room, view } = await doneView(roomId, viewId);
+    return beginRound(roomId, { text: `more like "${view.angle}"`, source: "key", kind: "more", parents: [parentRef(room, view, "varied")] });
+  }
+
+  /** x: two views crossed, two different ways. A is the first marked. */
+  async function cross(roomId: string, aId: string, bId: string): Promise<string> {
+    if (aId === bId) throw new Error("Mark two different views to cross.");
+    const a = await doneView(roomId, aId);
+    const b = await doneView(roomId, bId);
+    return beginRound(roomId, {
+      text: `cross "${a.view.angle}" × "${b.view.angle}"`,
+      source: "key",
+      kind: "cross",
+      parents: [parentRef(a.room, a.view, "crossed", "A"), parentRef(b.room, b.view, "crossed", "B")],
+    });
+  }
+
+  /**
+   * z: a child room on the same folder about one part of a view. Its first
+   * round starts at once, with the view as quoted reference.
+   */
+  async function zoom(roomId: string, viewId: string, part: string, source: "typed" | "voice" | "pasted") {
+    const { room: parent, view } = await doneView(roomId, viewId);
+    const id = newId("room");
+    const child = makeRoom({
+      id,
+      subject: part,
+      folder: parent.folder,
+      hostId: parent.hostId,
+      projectId: parent.projectId,
+      dir: join(parent.dir, `${slug(part)}-${id.replace(/^room_/, "").slice(0, 6)}`),
+      now: Date.now(),
+    });
+    child.environmentId = parent.environmentId ?? null;
+    child.parent = { roomId: parent.id, roomSubject: parent.subject, roundId: view.roundId, viewId: view.id, angle: view.angle };
+    addLine(child, { kind: "did", text: `Zoomed in from "${view.angle}" in "${parent.subject}"; kept views go to ${child.dir}` });
+    await store.put(child);
+    await note(parent.id, "did", `Zoomed into "${part}" from "${view.angle}" → a child room`, view.roundId);
+    const roundId = await beginRound(child.id, { text: part, source, kind: "zoom", parents: [parentRef(parent, view, "zoomed")] });
+    return { room: (await store.get(child.id))!, roundId };
+  }
+
+  /** p: pin a view as context for the next lines, or (null) unpin. */
+  async function pin(roomId: string, viewId: string | null) {
+    if (viewId !== null) await doneView(roomId, viewId);
+    const { room } = await store.update(roomId, (r) => setPin(r, viewId));
+    publish(roomId);
+    return room;
+  }
+
+  /** D in the room list: take the room out of egg and archive its threads. Kept files stay on disk. */
+  async function deleteRoom(roomId: string) {
+    let threads: string[] = [];
+    try {
+      const { result } = await store.update(roomId, (r) => supersede(r));
+      threads = result.map((v) => v.threadId).filter((t): t is string => t !== null);
+    } catch {
+      return false;
+    }
+    const removed = await store.remove(roomId);
+    for (const t of threads) void archiveThread(t);
+    publish(roomId);
+    return removed !== null;
+  }
+
+  /** u in the room list: put a deleted room back. */
+  async function restoreRoom(roomId: string) {
+    const room = await store.restore(roomId);
+    publish(roomId);
+    return room;
   }
 
   async function note(roomId: string, kind: "did" | "trouble", text: string, roundId?: string) {
@@ -151,8 +292,9 @@ export function createEngine(deps: EngineDeps) {
     publish(roomId);
   }
 
-  async function plan(room: Room, roundId: string, settings: EngineSettings) {
+  async function plan(room: Room, roundId: string, settings: EngineSettings, spec: RoundSpec): Promise<{ angles: Angle[]; note: string | null; ms: number }> {
     const round = findRound(room, roundId);
+    const fallback = fallbackFor(spec.kind);
     const started = Date.now();
     let threadId: string | null = null;
     try {
@@ -162,41 +304,40 @@ export function createEngine(deps: EngineDeps) {
         permissionMode: settings.permissionMode,
         title: `${settings.titlePrefix}: planning · ${room.subject.slice(0, 40)}`,
         visibility: "hidden",
-        prompt: plannerPrompt(room, round.line),
+        prompt: plannerPrompt(room, round.line, spec),
         pluginMetadata: { roomId: room.id, roundId, viewId: null, role: "planner" },
       });
       threadId = thread.id;
       await sdk.threads.wait({ threadId, status: "idle", timeoutMs: PLANNER_TIMEOUT_MS });
       const output = await sdk.threads.output({ threadId });
       const text = output.output ?? "";
-      const angles = parseAngles(text);
-      if (angles === null) return { angles: [...FALLBACK_ANGLES], note: "The planning step gave no usable angles; egg used its own spread.", ms: Date.now() - started };
-      return { angles, note: null, ms: Date.now() - started };
+      const angles = parseAngles(text, spec.kind);
+      if (angles === null) return { angles: fallback, note: "The planning step gave no usable angles; egg used its own spread.", ms: Date.now() - started };
+      const added = angles.filter((a) => fallback.includes(a)).length;
+      const note = added > 0 ? `The planning step gave ${angles.length - added} distinct ${spec.kind === "line" || spec.kind === "zoom" ? "angles" : spec.kind === "more" ? "axes" : "ways"}; egg added ${added} of its own.` : null;
+      return { angles, note, ms: Date.now() - started };
     } catch (e) {
-      return { angles: [...FALLBACK_ANGLES], note: `The planning step failed (${errText(e)}); egg used its own spread.`, ms: Date.now() - started };
+      return { angles: fallback, note: `The planning step failed (${errText(e)}); egg used its own spread.`, ms: Date.now() - started };
     } finally {
       if (threadId) void archiveThread(threadId);
     }
   }
 
-  async function runRound(room: Room, roundId: string, settings: EngineSettings) {
-    const planned = await plan(room, roundId, settings);
+  async function runRound(room: Room, roundId: string, settings: EngineSettings, spec: RoundSpec) {
+    const planned = await plan(room, roundId, settings, spec);
     const { room: updated, result: views } = await store.update(room.id, (r) => {
       const vs = setAngles(r, roundId, planned.angles, settings.viewModel, planned.note);
-      addLine(r, {
-        kind: planned.note ? "trouble" : "did",
-        text: planned.note ?? `Four angles in ${seconds(planned.ms)}: ${vs.map((v) => v.angle).join(" · ")}`,
-        roundId,
-      });
+      if (planned.note) addLine(r, { kind: "trouble", text: planned.note, roundId });
+      addLine(r, { kind: "did", text: plannedLine(spec.kind, vs, planned.ms), roundId });
       return vs;
     });
     publish(room.id);
     const line = findRound(updated, roundId).line;
-    await Promise.all(views.map((view) => startView(updated, roundId, line, view, settings)));
+    await Promise.all(views.map((view) => startView(updated, roundId, line, view, settings, spec)));
     publish(room.id);
   }
 
-  async function startView(room: Room, roundId: string, line: string, view: View, settings: EngineSettings) {
+  async function startView(room: Room, roundId: string, line: string, view: View, settings: EngineSettings, spec: RoundSpec) {
     try {
       const thread = await spawnOn(room, {
         providerId: settings.providerId,
@@ -204,7 +345,7 @@ export function createEngine(deps: EngineDeps) {
         permissionMode: settings.permissionMode,
         title: viewThreadTitle(settings.titlePrefix, view.angle, room.subject),
         visibility: "hidden",
-        prompt: viewPrompt(room, line, { name: view.angle, focus: view.focus }),
+        prompt: viewPrompt(room, line, { name: view.angle, focus: view.focus, ...(view.axis ? { axis: view.axis } : {}) }, spec),
         pluginMetadata: { roomId: room.id, roundId, viewId: view.id, role: "view" },
       });
       await store.update(room.id, (r) => viewStarted(r, view.id, thread.id, null));
@@ -340,6 +481,6 @@ export function createEngine(deps: EngineDeps) {
     return (await store.get(roomId))!;
   }
 
-  return { createRoom, say, note, finishView, onThreadSettled, reconcile, decideView };
+  return { createRoom, say, more, cross, zoom, pin, deleteRoom, restoreRoom, note, finishView, onThreadSettled, reconcile, decideView };
 }
 export type Engine = ReturnType<typeof createEngine>;

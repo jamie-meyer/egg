@@ -15,7 +15,11 @@ const lineText = z.string().trim().min(1).max(4000);
 const source = z.enum(["typed", "voice", "pasted"]);
 
 export const rpcContract = defineRpcContract({
-  /** Where a new room reads by default: the current project's checkout. */
+  /**
+   * Where a new room reads by default: the folder of the last room made,
+   * else the current project's checkout; and every bb project's checkouts
+   * to pick from.
+   */
   defaults: {
     input: z.object({ projectId: z.string().max(100).nullable() }),
     output: z.object({
@@ -23,6 +27,7 @@ export const rpcContract = defineRpcContract({
       hostId: z.string().nullable(),
       projectId: z.string().nullable(),
       roomsDir: z.string(),
+      checkouts: z.array(z.object({ projectId: z.string(), name: z.string(), path: z.string() })),
     }),
   },
   rooms_list: { input: z.null(), output: z.object({ rooms: z.array(roomSummarySchema) }) },
@@ -33,6 +38,18 @@ export const rpcContract = defineRpcContract({
   room_get: { input: z.object({ roomId: id }), output: z.object({ room: roomSchema.nullable() }) },
   /** A line from the person: starts a round. */
   say: { input: z.object({ roomId: id, text: lineText, source }), output: z.object({ roundId: z.string() }) },
+  /** m: four variations of a view along different axes. */
+  more: { input: z.object({ roomId: id, viewId: id }), output: z.object({ roundId: z.string() }) },
+  /** x: cross two views (A first). */
+  cross: { input: z.object({ roomId: id, a: id, b: id }), output: z.object({ roundId: z.string() }) },
+  /** z: a child room about one part of a view; its first round starts at once. */
+  zoom: { input: z.object({ roomId: id, viewId: id, part: lineText, source }), output: z.object({ room: roomSchema }) },
+  /** p: pin a view as context, or with null unpin. */
+  pin: { input: z.object({ roomId: id, viewId: id.nullable() }), output: z.object({ room: roomSchema }) },
+  /** D in the room list: take a room out of egg (kept files stay on disk). */
+  room_delete: { input: z.object({ roomId: id }), output: z.object({ deleted: z.boolean() }) },
+  /** u in the room list: put a deleted room back. */
+  room_restore: { input: z.object({ roomId: id }), output: z.object({ restored: z.boolean() }) },
   /** Something the page needs on the notebook, such as a failed transcription. */
   note: { input: z.object({ roomId: id, text: lineText }), output: z.null() },
   view_content: {
@@ -197,16 +214,35 @@ export default async function plugin(bb: BbPluginApi) {
     return null;
   }
 
+  /** Every bb project's checkouts (its local sources), default ones first. */
+  async function checkouts(): Promise<{ projectId: string; name: string; path: string }[]> {
+    try {
+      const projects = (await bb.sdk.projects.list()) as { id: string; name?: string; sources?: { path?: string; isDefault?: boolean }[] }[];
+      const out = projects.flatMap((p) =>
+        [...(p.sources ?? [])]
+          .sort((a, b) => Number(b.isDefault ?? false) - Number(a.isDefault ?? false))
+          .filter((src) => typeof src.path === "string" && src.path.length > 0)
+          .map((src) => ({ projectId: p.id, name: p.name ?? p.id, path: src.path! })),
+      );
+      const seen = new Set<string>();
+      return out.filter((c) => (seen.has(c.path) ? false : (seen.add(c.path), true))).slice(0, 100);
+    } catch {
+      return [];
+    }
+  }
+
   bb.rpc.register(rpcContract, {
     defaults: async ({ projectId: given }) => {
-      const projectId = given ?? (await recentProjectId());
+      const last = await store.lastFolder();
+      const projectId = given ?? last?.projectId ?? (await recentProjectId());
       const checkout = await projectCheckout(projectId);
       const s = await engineSettings();
       return {
-        folder: checkout?.folder ?? null,
+        folder: last?.folder ?? checkout?.folder ?? null,
         hostId: checkout?.hostId ?? (await primaryHostId()),
-        projectId: checkout?.projectId ?? projectId,
+        projectId: last ? (last.projectId ?? projectId) : (checkout?.projectId ?? projectId),
         roomsDir: expandHome(s.roomsDir),
+        checkouts: await checkouts(),
       };
     },
     rooms_list: async () => ({ rooms: (await store.list()).map(summarize) }),
@@ -231,6 +267,12 @@ export default async function plugin(bb: BbPluginApi) {
       return { room };
     },
     say: async ({ roomId, text, source: from }) => ({ roundId: await engine.say(roomId, text, from) }),
+    more: async ({ roomId, viewId }) => ({ roundId: await engine.more(roomId, viewId) }),
+    cross: async ({ roomId, a, b }) => ({ roundId: await engine.cross(roomId, a, b) }),
+    zoom: async ({ roomId, viewId, part, source: from }) => ({ room: (await engine.zoom(roomId, viewId, part, from)).room }),
+    pin: async ({ roomId, viewId }) => ({ room: await engine.pin(roomId, viewId) }),
+    room_delete: async ({ roomId }) => ({ deleted: await engine.deleteRoom(roomId) }),
+    room_restore: async ({ roomId }) => ({ restored: (await engine.restoreRoom(roomId)) !== null }),
     note: async ({ roomId, text }) => {
       await engine.note(roomId, "trouble", text);
       return null;

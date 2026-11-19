@@ -42,6 +42,42 @@ Then open **egg** from bb's navigation rail (or go to `/plugins/egg/egg`).
   `egg: <angle> · <subject>`, and archived when their round is superseded
   or the view is dropped.
 
+### Going further from a view
+
+Each of these works on the selected view, on the table or in the kept
+strip, and every view it makes still reads the real folder.
+
+- **More like this** (`m`): a round of four variations of the view. The
+  planning step names four different axes to vary it along (a narrower
+  scope, a different form, a different question about the same data, a
+  different grain, …) and each card shows its axis. The notebook says
+  `more like "<angle>"`.
+- **Mark, compare, cross**: `v` marks a view (two at most; a third
+  replaces the older). `c` shows the two marked views large, side by side,
+  with no model involved. `x` crosses them: a round of two views that each
+  combine the parents a different way, with every part labelled `[A]`,
+  `[B]` or `[A+B]`; the card names both parents. The notebook says
+  `cross "<angle A>" × "<angle B>"`.
+- **Zoom into a part** (`z`): the line input opens with "zoom into…"; type
+  or paste the part. That makes a **child room** on the same folder, about
+  that part, and its first round starts at once. `-` goes back up to the
+  parent room, at the view you zoomed from. The room list shows child rooms
+  under their parents, and each child room keeps its kept views in its own
+  directory, inside the parent's.
+- **Pin** (`p`): pins or unpins a view (one at a time). While it is
+  pinned, every line's round gets it as reference, and the notebook says
+  so. This is how an earlier view is pulled back into play.
+- **Where a view came from**: a view made by any of these records its
+  parents (room, round, view). "Built from" lists them above the files and
+  commands, and a kept view's JSON has them too.
+
+The parent view's content is handed to the planning step and the view
+threads as **quoted reference material**, between delimiters that carry a
+fresh random token for each round, with the instruction that nothing inside
+is an instruction. It was written by a model that read arbitrary files, so
+it is treated as data. The view threads are told to rebuild from the folder
+and not to copy a fact from the reference without checking it.
+
 ### Lines in
 
 - **Type**: `i` opens a one-line input. Enter sends, Escape leaves.
@@ -73,11 +109,25 @@ Press `?` on the page for this legend.
 | `u` | undo the last keep or drop |
 | `b` | show or hide what views were built from |
 | `[` `]` | previous, next round; `G` the latest |
-| `r` | the list of rooms, most recent first (`j` `k`, Enter) |
+| `m` | more like this: four variations along named axes |
+| `v` | mark or unmark the view (two at most) |
+| `c` | compare the two marked views side by side; Escape closes |
+| `x` | cross the two marked views |
+| `z` | zoom into a part of the view: a child room |
+| `-` | up to the parent room |
+| `p` | pin or unpin the view as context for the next lines |
+| `r` | the list of rooms, child rooms under their parents (`j` `k`, Enter) |
+| `D` | in the room list: delete the room; `u` undoes while the list is open |
 | `n` | a new room |
 | `?` | the legend |
 
-Keep and drop are instant and never ask anything.
+Keep, drop and deleting a room are instant and never ask anything.
+Deleting a room takes it out of egg and archives its threads; its kept
+files stay on disk, and its child rooms move to the top level of the list.
+
+In the new-room form the folder defaults to the folder of the last room
+made; below it is a list of bb's project checkouts, which Up and Down (or
+Ctrl-n, Ctrl-p) pick from.
 
 ## What it stores, and where
 
@@ -87,8 +137,9 @@ Keep and drop are instant and never ask anything.
 - **Kept views are plain files.** Each room has a directory under the
   *Rooms directory* setting (default `~/egg`); the page shows its path.
   Keeping a view writes the view (`.html` or `.txt`) and a small `.json`
-  beside it: the room, the line that produced it, its angle, the model, the
-  time, and the "built from" list. Undoing a keep removes both files, and
+  beside it: the room (and for a child room, the room and view it was
+  zoomed from), the line that produced it, the kind of round, its angle and
+  axis, the model, the time, its parent views, and the "built from" list. Undoing a keep removes both files, and
   so does dropping a view that was kept.
   Dropping a view takes it off the table, not out of the notebook.
 
@@ -99,7 +150,8 @@ egg runs agent threads through bb on the provider and models you choose
 `claude-haiku-5-5` for planning). **Those agents read the contents of the
 folder a room points at**, and what they read goes to that provider. The
 planning step sends the room's subject, its earlier lines and the names of
-kept and dropped views. Hold-to-talk sends your recording to whatever voice
+kept and dropped views, and, for a variation, cross, zoom or pinned round,
+the text of the parent views. Hold-to-talk sends your recording to whatever voice
 service bb is set to use.
 
 The agents are told the folder is read only and to write only their view,
@@ -158,7 +210,7 @@ and the prefix of thread titles.
 npm test                     # unit tests
 npm run typecheck
 node scripts/sandbox-check.mjs   # needs Chrome
-node scripts/e2e.mjs --folder <absolute folder>   # needs Chrome and a running bb; runs one round
+node scripts/e2e.mjs --folder <absolute folder> [--plugin <id>]   # needs Chrome and a running bb
 ```
 
 ## Licence
