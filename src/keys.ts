@@ -160,6 +160,20 @@ export function selectionFor(kept: boolean, index: number, rows: readonly number
   return { row: Math.floor(index / per), col: index % per };
 }
 
+/**
+ * h and l move through the round's cards in reading order, across the
+ * rows of the grid; j and k move straight up and down. The kept strip is
+ * one row of its own.
+ */
+export function moveOnTable(sel: Selection, rows: readonly number[], cols: number, dx: number, dy: number): Selection {
+  if (dy !== 0 || dx === 0) return moveSelection(sel, rows, 0, dy);
+  const at = pickAt(clampSelection(sel, rows), rows, cols);
+  if (at.kept) return moveSelection(sel, rows, dx, 0);
+  const cards = rows.slice(0, -1).reduce((a, b) => a + b, 0);
+  if (cards === 0) return clampSelection(sel, rows);
+  return selectionFor(false, Math.max(0, Math.min(cards - 1, at.index + dx)), rows, cols);
+}
+
 export function clampSelection(sel: Selection, rows: readonly number[]): Selection {
   return moveSelection(sel, rows, 0, 0);
 }

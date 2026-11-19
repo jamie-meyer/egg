@@ -39,3 +39,9 @@ test("text views are escaped", () => {
   const doc = viewDocument("text", "<script>alert(1)</script> & co");
   assert.ok(doc.includes("&lt;script&gt;alert(1)&lt;/script&gt; &amp; co"));
 });
+
+test("HTML views get a plain light page; text views follow bb's theme", () => {
+  const dark = { background: "rgb(20, 20, 20)", foreground: "rgb(230, 230, 230)", muted: "gray", border: "gray", font: "Inter", mono: "Menlo", scheme: "dark" as const };
+  assert.ok(viewDocument("html", "<p>x</p>", dark).includes("background:#ffffff"));
+  assert.ok(viewDocument("text", "x", dark).includes("background:rgb(20, 20, 20)"));
+});

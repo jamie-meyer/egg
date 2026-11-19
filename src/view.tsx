@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "./keys.ts";
+import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, moveOnTable, pasteAction, pickAt, selectionFor, tableRows } from "./keys.ts";
 import { type BuiltFrom, type Line, type Room, type RoomSummary, type Round, type View, keptViews, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
@@ -439,7 +439,7 @@ export function EggPage() {
   );
 
   // Keys and paste. Only when focus is on this page (or nowhere), never in a text field.
-  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, rounds, shownIndex, rooms, roomSel, holdKey, settings };
+  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings };
   const live = useRef(state);
   live.current = state;
   useEffect(() => {
@@ -505,13 +505,13 @@ export function EggPage() {
     switch (command.kind) {
       case "move":
         if (s.mode === "rooms") setRoomSel((i) => Math.max(0, Math.min(s.rooms.length - 1, i + command.dy)));
-        else setSel(moveSelection(s.current, s.rowLengths, command.dx, command.dy));
+        else setSel(moveOnTable(s.current, s.rowLengths, s.cols, command.dx, command.dy));
         return;
       case "first":
-        setSel({ row: s.current.row, col: 0 });
+        setSel(s.at.kept ? { row: s.current.row, col: 0 } : selectionFor(false, 0, s.rowLengths, s.cols));
         return;
       case "last":
-        setSel({ row: s.current.row, col: 99 });
+        setSel(s.at.kept ? { row: s.current.row, col: 99 } : selectionFor(false, Math.max(0, s.cards.length - 1), s.rowLengths, s.cols));
         return;
       case "open":
         if (s.mode === "rooms") {
@@ -586,8 +586,8 @@ export function EggPage() {
         {room ? (
           <>
             <span className="egg-subject" data-egg-subject="">{room.subject}</span>
-            <span className="egg-muted egg-small" title="the folder this room reads">reads {room.folder}</span>
-            <span className="egg-muted egg-small" data-egg-room-dir="" title="kept views are written here">keeps to {room.dir}</span>
+            <span className="egg-muted egg-small egg-path" title={room.folder}>reads {room.folder}</span>
+            <span className="egg-muted egg-small egg-path" data-egg-room-dir="" title={room.dir}>keeps to {room.dir}</span>
           </>
         ) : (
           <span className="egg-muted egg-small">rooms in {roomsDir}</span>

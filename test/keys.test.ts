@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commandFor, holdKeyCode, isEditable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "../src/keys.ts";
+import { commandFor, holdKeyCode, isEditable, moveOnTable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "../src/keys.ts";
 
 test("table keys", () => {
   assert.deepEqual(commandFor({ key: "h" }, "table"), { kind: "move", dx: -1, dy: 0 });
@@ -85,4 +85,19 @@ test("j and k follow the grid as it is laid out, then reach the kept strip", () 
   assert.deepEqual(tableRows(3, 4, 0), [3, 0]);
   assert.deepEqual(tableRows(0, 2, 1), [0, 1]);
   assert.deepEqual(selectionFor(true, 0, [0, 1], 2), { row: 1, col: 0 });
+});
+
+test("h and l read the cards in order across the grid's rows", () => {
+  const rows = tableRows(4, 2, 2);
+  let sel = selectionFor(false, 1, rows, 2);
+  sel = moveOnTable(sel, rows, 2, 1, 0);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 2 }, "l at a row's end goes on to the next row");
+  sel = moveOnTable(sel, rows, 2, -1, 0);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 1 });
+  sel = moveOnTable(selectionFor(false, 3, rows, 2), rows, 2, 1, 0);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 3 }, "stops at the last card");
+  sel = moveOnTable(selectionFor(true, 0, rows, 2), rows, 2, 1, 0);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: true, index: 1 }, "the kept strip is its own row");
+  sel = moveOnTable(selectionFor(false, 0, rows, 2), rows, 2, 0, 1);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 2 }, "j goes straight down");
 });

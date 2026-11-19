@@ -87,9 +87,14 @@ pre.egg-text{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 $
 a{color:inherit;text-decoration:underline dotted;cursor:default}`;
 }
 
-/** The whole srcdoc for a view. Our CSP comes first, before anything the model wrote. */
+/**
+ * The whole srcdoc for a view. Our CSP comes first, before anything the
+ * model wrote. Text views take bb's theme; HTML views get a plain light
+ * page, since models write them for one.
+ */
 export function viewDocument(format: "html" | "text", content: string, theme: ViewTheme = PLAIN_THEME): string {
-  const head = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${VIEW_CSP}"><meta name="referrer" content="no-referrer"><style>${baseStyle(theme)}</style></head>`;
+  const base = baseStyle(format === "text" ? theme : PLAIN_THEME);
+  const head = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${VIEW_CSP}"><meta name="referrer" content="no-referrer"><style>${base}</style></head>`;
   if (format === "text") return `${head}<body><pre class="egg-text">${escapeHtml(content)}</pre></body></html>`;
   return `${head}<body>${defang(content)}</body></html>`;
 }

@@ -88,7 +88,8 @@ Keep and drop are instant and never ask anything.
   *Rooms directory* setting (default `~/egg`); the page shows its path.
   Keeping a view writes the view (`.html` or `.txt`) and a small `.json`
   beside it: the room, the line that produced it, its angle, the model, the
-  time, and the "built from" list. Undoing a keep removes both files.
+  time, and the "built from" list. Undoing a keep removes both files, and
+  so does dropping a view that was kept.
   Dropping a view takes it off the table, not out of the notebook.
 
 ## What it sends to model providers
