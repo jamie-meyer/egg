@@ -1,0 +1,219 @@
+/* egg's page. Every colour and font comes from bb's theme tokens, so the
+   page follows whatever theme bb runs. Everything is scoped under .egg. */
+
+.egg {
+  --egg-bg: var(--background, #fbfaf7);
+  --egg-bg2: var(--muted, #f0eee8);
+  --egg-fg: var(--foreground, #1f1e1b);
+  --egg-muted: var(--muted-foreground, #77746c);
+  --egg-rule: var(--border, #dcd8ce);
+  --egg-accent: var(--primary, #3360c4);
+  --egg-trouble: var(--destructive-text, var(--destructive, #b83a2a));
+  --egg-ok: var(--success, #2d7a5c);
+  --egg-sans: var(--font-sans, system-ui, sans-serif);
+  --egg-mono: var(--font-mono, ui-monospace, monospace);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  background: var(--egg-bg);
+  color: var(--egg-fg);
+  border-color: var(--egg-rule);
+  font: 14px/1.45 var(--egg-sans);
+  outline: 0;
+  overflow: hidden;
+}
+.egg *,
+.egg *::before,
+.egg *::after {
+  box-sizing: border-box;
+}
+.egg-muted { color: var(--egg-muted); }
+.egg-small { font-size: 12px; }
+.egg-trouble { color: var(--egg-trouble); }
+.egg-spacer { flex: 1 1 auto; }
+.egg kbd {
+  font: 11px var(--egg-mono);
+  border: 1px solid var(--egg-rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 4px;
+  background: var(--egg-bg2);
+}
+.egg code { font: 12px var(--egg-mono); }
+.egg h2 { font-size: 15px; margin: 0 0 10px; }
+.egg h3 { font-size: 12px; margin: 10px 0 4px; color: var(--egg-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.egg-top {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--egg-rule);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.egg-mark { font-weight: 700; }
+.egg-subject { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.egg-hint { font-size: 12px; color: var(--egg-muted); }
+.egg-voice { font-size: 12px; font-weight: 600; }
+.egg-voice-recording { color: var(--egg-trouble); }
+
+.egg-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(240px, 30%) 1fr;
+}
+
+/* The notebook: one line per row, newest at the bottom. */
+.egg-notebook {
+  overflow-y: auto;
+  border-right: 1px solid var(--egg-rule);
+  padding: 10px 0 14px;
+  display: flex;
+  flex-direction: column;
+}
+.egg-lines { list-style: none; margin: 0; padding: 0; margin-top: auto; }
+.egg-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 14px;
+  font-size: 13px;
+}
+.egg-line-mark { width: 12px; flex: 0 0 auto; color: var(--egg-muted); font-family: var(--egg-mono); }
+.egg-line-said { font-weight: 600; margin-top: 8px; }
+.egg-line-did { color: var(--egg-muted); }
+.egg-line-trouble { color: var(--egg-trouble); }
+.egg-line-text { min-width: 0; overflow-wrap: anywhere; }
+.egg-input-row { display: flex; gap: 8px; align-items: center; padding: 6px 14px 0; }
+.egg-prompt-hint { padding: 8px 14px 0 34px; margin: 0; }
+.egg-input {
+  flex: 1 1 auto;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--egg-bg2);
+  border: 1px solid var(--egg-rule);
+  border-radius: 6px;
+  padding: 5px 8px;
+  outline: 0;
+}
+.egg-input:focus { border-color: var(--egg-accent); }
+
+/* The table of views. */
+.egg-table {
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.egg-round-head { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.egg-round-line { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egg-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.egg-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--egg-rule);
+  border-radius: 8px;
+  background: var(--egg-bg);
+  overflow: hidden;
+  cursor: default;
+}
+.egg-card-ghost { min-height: 300px; background: var(--egg-bg2); opacity: 0.5; }
+.egg-card.egg-selected { border-color: var(--egg-accent); box-shadow: 0 0 0 1px var(--egg-accent); }
+.egg-card-head { display: flex; gap: 8px; align-items: baseline; padding: 8px 10px 0; min-width: 0; }
+.egg-angle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.egg-badge { font-size: 11px; color: var(--egg-ok); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; }
+.egg-focus { margin: 2px 10px 6px; font-size: 12px; line-height: 1.35; }
+.egg-card-body { padding: 0 6px; }
+.egg-frame {
+  display: block;
+  width: 100%;
+  height: 240px;
+  border: 1px solid var(--egg-rule);
+  border-radius: 4px;
+  background: #fff;
+  pointer-events: none;
+}
+.egg-frame-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--egg-muted);
+  background: var(--egg-bg2);
+}
+.egg-running .egg-frame-empty, .egg-waiting .egg-frame-empty { animation: egg-pulse 1.6s ease-in-out infinite; }
+@keyframes egg-pulse { 50% { opacity: 0.55; } }
+.egg-failed .egg-card-foot { color: var(--egg-trouble); }
+.egg-card-foot { padding: 6px 10px 8px; }
+.egg-built {
+  list-style: none;
+  margin: 0;
+  padding: 6px 10px 10px;
+  border-top: 1px solid var(--egg-rule);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.egg-built li { display: flex; gap: 6px; font-size: 12px; line-height: 1.5; min-width: 0; }
+.egg-built code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.egg-built-kind { flex: 0 0 56px; color: var(--egg-muted); }
+.egg-built-outside code { color: var(--egg-trouble); }
+
+.egg-kept { border-top: 1px solid var(--egg-rule); padding-top: 8px; }
+.egg-kept-row { display: flex; gap: 10px; overflow-x: auto; padding: 6px 0; }
+.egg-card-compact { flex: 0 0 200px; }
+.egg-card-compact .egg-frame { height: 120px; }
+
+/* Over the page: a view large, rooms, a new room, the legend. */
+.egg-large {
+  position: absolute;
+  inset: 44px 0 0 0;
+  background: var(--egg-bg);
+  display: flex;
+  flex-direction: column;
+  z-index: 3;
+  border-top: 1px solid var(--egg-rule);
+}
+.egg-large .egg-card-head { padding: 10px 16px; }
+.egg-large-body { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; padding: 0 16px 16px; }
+.egg-frame-large { height: 100%; flex: 1 1 auto; pointer-events: auto; }
+.egg-large-built { flex: 0 0 34%; overflow-y: auto; }
+.egg-large-built .egg-built { max-height: none; border-top: 0; padding: 0; }
+
+.egg-sheet {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 32px));
+  max-height: calc(100% - 80px);
+  overflow-y: auto;
+  z-index: 5;
+  background: var(--egg-bg);
+  border: 1px solid var(--egg-rule);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.egg-sheet label { display: flex; flex-direction: column; gap: 3px; }
+.egg-room-list { list-style: none; margin: 0; padding: 0; }
+.egg-room-list li { display: flex; flex-direction: column; padding: 6px 8px; border-radius: 6px; cursor: default; }
+.egg-room-list li.egg-selected { background: var(--egg-bg2); box-shadow: inset 2px 0 0 var(--egg-accent); }
+.egg-legend dl { margin: 0; }
+.egg-legend-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 2px 0; font-size: 13px; }
+.egg-legend dd { margin: 0; }

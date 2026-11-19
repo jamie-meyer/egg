@@ -1,0 +1,34 @@
+{
+  "name": "bb-plugin-egg",
+  "version": "0.1.0",
+  "description": "An ideation room: point it at a folder, say a half-formed thought, and compare a few views of the real thing side by side.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "bb": {
+    "name": "egg",
+    "description": "🥚 An ideation room: say a half-formed thought about a folder and compare a few views of the real thing side by side.",
+    "branding": {
+      "icon": "Egg"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
