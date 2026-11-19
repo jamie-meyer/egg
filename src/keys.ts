@@ -134,6 +134,32 @@ export function moveSelection(sel: Selection, rows: readonly number[], dx: numbe
   return { row, col };
 }
 
+/**
+ * The table as rows of what is on screen: the round's cards wrapped at
+ * `cols` per row, then the kept strip as the last row.
+ */
+export function tableRows(cards: number, cols: number, kept: number): number[] {
+  const per = Math.max(1, cols);
+  const rows: number[] = [];
+  for (let i = 0; i < cards; i += per) rows.push(Math.min(per, cards - i));
+  if (rows.length === 0) rows.push(0);
+  rows.push(kept);
+  return rows;
+}
+
+/** Which card a selection points at: one of the round's, or one in the kept strip. */
+export function pickAt(sel: Selection, rows: readonly number[], cols: number): { kept: boolean; index: number } {
+  if (sel.row === rows.length - 1) return { kept: true, index: sel.col };
+  return { kept: false, index: sel.row * Math.max(1, cols) + sel.col };
+}
+
+/** The selection for a round's card or a kept card. */
+export function selectionFor(kept: boolean, index: number, rows: readonly number[], cols: number): Selection {
+  if (kept) return { row: rows.length - 1, col: index };
+  const per = Math.max(1, cols);
+  return { row: Math.floor(index / per), col: index % per };
+}
+
 export function clampSelection(sel: Selection, rows: readonly number[]): Selection {
   return moveSelection(sel, rows, 0, 0);
 }
@@ -185,7 +211,7 @@ export const LEGEND: readonly { title: string; keys: readonly [string, string][]
     title: "The table",
     keys: [
       ["h l", "previous, next card (arrows too); 0 and $ first and last"],
-      ["j k", "between the round's cards and the kept strip"],
+      ["j k", "down and up the grid of cards, and to the kept strip"],
       ["Enter", "open the selected view large; Escape closes it"],
       ["y", "keep: writes it to the room's directory"],
       ["d", "drop: off the table, still in the notebook"],

@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, moveSelection, pasteAction } from "./keys.ts";
+import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "./keys.ts";
 import { type BuiltFrom, type Line, type Room, type RoomSummary, type Round, type View, keptViews, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
@@ -67,7 +67,7 @@ function BuiltFromList({ entries }: { entries: readonly BuiltFrom[] }) {
       {entries.map((e, i) => (
         <li key={i} className={e.outside ? "egg-built-outside" : undefined}>
           <span className="egg-built-kind">{e.kind}</span>
-          <code>{e.what}</code>
+          <code title={e.what}>{e.what}</code>
           {e.failed ? <span className="egg-trouble"> (failed)</span> : null}
           {e.outside ? <span className="egg-trouble"> (outside its storage)</span> : null}
         </li>
@@ -280,6 +280,21 @@ export function EggPage() {
   const [hint, setHint] = useState<string | null>(null);
   const [roomsDir, setRoomsDir] = useState<string>("");
   const [theme, setTheme] = useState<ViewTheme>(PLAIN_THEME);
+  const [cols, setCols] = useState(2);
+  const observer = useRef<ResizeObserver | null>(null);
+  // How many cards fit on a row, so j and k move the way the grid looks.
+  const cardsRef = useCallback((el: HTMLDivElement | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
+    if (!el) return;
+    const measure = () => {
+      const n = getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length;
+      if (n > 0) setCols(n);
+    };
+    measure();
+    observer.current = new ResizeObserver(measure);
+    observer.current.observe(el);
+  }, []);
   const undo = useRef<{ roomId: string; viewId: string; before: View["decision"] }[]>([]);
 
   const loadRooms = useCallback(() => {
@@ -331,9 +346,12 @@ export function EggPage() {
   const cards = useMemo(() => (room && round ? roundViews(room, round).filter((v) => v.decision !== "dropped") : []), [room, round]);
   const dropped = useMemo(() => (room && round ? roundViews(room, round).filter((v) => v.decision === "dropped").length : 0), [room, round]);
   const kept = useMemo(() => (room ? keptViews(room) : []), [room]);
-  const rowLengths = [cards.length, kept.length];
+  const rowLengths = tableRows(cards.length, cols, kept.length);
   const current = clampSelection(sel, rowLengths);
-  const selected: View | undefined = current.row === 0 ? cards[current.col] : kept[current.col];
+  const at = pickAt(current, rowLengths, cols);
+  const selected: View | undefined = at.kept ? kept[at.index] : cards[at.index];
+  const isSelected = (keptCard: boolean, i: number) => at.kept === keptCard && at.index === i;
+  const select = (keptCard: boolean, i: number) => setSel(selectionFor(keptCard, i, rowLengths, cols));
   const anyRunning = cards.some((v) => v.status === "running" || v.status === "waiting") || round?.status === "planning";
   const now = useNow(anyRunning);
 
@@ -414,7 +432,7 @@ export function EggPage() {
   );
 
   // Keys and paste. Only when focus is on this page (or nowhere), never in a text field.
-  const state = { mode, creating, input, room, cards, kept, current, selected, rounds, shownIndex, rooms, roomSel, holdKey, settings };
+  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, rounds, shownIndex, rooms, roomSel, holdKey, settings };
   const live = useRef(state);
   live.current = state;
   useEffect(() => {
@@ -480,7 +498,7 @@ export function EggPage() {
     switch (command.kind) {
       case "move":
         if (s.mode === "rooms") setRoomSel((i) => Math.max(0, Math.min(s.rooms.length - 1, i + command.dy)));
-        else setSel(moveSelection(s.current, [s.cards.length, s.kept.length], command.dx, command.dy));
+        else setSel(moveSelection(s.current, s.rowLengths, command.dx, command.dy));
         return;
       case "first":
         setSel({ row: s.current.row, col: 0 });
@@ -505,7 +523,7 @@ export function EggPage() {
         if (s.selected?.status === "done" && s.selected.decision !== "kept") void decide(s.selected, "kept");
         return;
       case "drop":
-        if (s.selected && s.current.row === 0 && s.selected.decision !== "dropped") {
+        if (s.selected && !s.at.kept && s.selected.decision !== "dropped") {
           void decide(s.selected, "dropped");
           if (s.mode === "large") setMode("table");
         }
@@ -609,21 +627,21 @@ export function EggPage() {
                 {round.status === "planning" ? <span className="egg-muted egg-small">picking four angles…</span> : null}
                 {dropped ? <span className="egg-muted egg-small">{dropped} dropped</span> : null}
               </div>
-              <div className="egg-cards" data-egg-cards="">
+              <div className="egg-cards" data-egg-cards="" ref={cardsRef}>
                 {round.status === "planning" && cards.length === 0
                   ? [0, 1, 2, 3].map((i) => <div key={i} className="egg-card egg-card-ghost" />)
                   : cards.map((v, i) => (
                       <Card
                         key={v.id}
                         view={v}
-                        selected={current.row === 0 && current.col === i}
+                        selected={isSelected(false, i)}
                         content={contents[v.id]}
                         theme={theme}
                         showBuilt={showBuilt}
                         now={now}
-                        onSelect={() => setSel({ row: 0, col: i })}
+                        onSelect={() => select(false, i)}
                         onOpen={() => {
-                          setSel({ row: 0, col: i });
+                          select(false, i);
                           setMode("large");
                         }}
                       />
@@ -648,14 +666,14 @@ export function EggPage() {
                     key={v.id}
                     compact
                     view={v}
-                    selected={current.row === 1 && current.col === i}
+                    selected={isSelected(true, i)}
                     content={contents[v.id]}
                     theme={theme}
                     showBuilt={false}
                     now={now}
-                    onSelect={() => setSel({ row: 1, col: i })}
+                    onSelect={() => select(true, i)}
                     onOpen={() => {
-                      setSel({ row: 1, col: i });
+                      select(true, i);
                       setMode("large");
                     }}
                   />

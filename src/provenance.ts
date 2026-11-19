@@ -32,6 +32,16 @@ function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+/** A command as run in the folder: a leading `cd <folder>` dropped, the folder's path shown as `.`. */
+export function commandInFolder(command: string, folder: string): string {
+  const f = folder.replace(/\/+$/, "");
+  const esc = f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return command
+    .replace(new RegExp(`^\\s*cd\\s+["']?${esc}/?["']?\\s*(&&|;)\\s*`), "")
+    .split(`${f}/`).join("")
+    .split(f).join(".");
+}
+
 export function relativeTo(folder: string, path: string): string {
   const base = folder.endsWith("/") ? folder : `${folder}/`;
   if (path === folder) return ".";
@@ -71,10 +81,10 @@ export function entriesForItem(item: unknown, ctx: ProvenanceContext): BuiltFrom
       const command = str(it.command);
       if (!command) return [];
       // The command that writes the view into thread storage is the view, not evidence.
-      if (/BB_THREAD_STORAGE/.test(command) && /(>|tee |cat <<)/.test(command) && /view\.(html|txt)/.test(command)) {
+      if (/BB_THREAD_STORAGE/.test(command) && /view\.(html|txt)/.test(command) && /(>|\btee\b|<<|\bsed -i|\bperl -pi|\bmv\b|\bcp\b)/.test(command)) {
         return [{ kind: "wrote", what: "the view (thread storage)", ...failed }];
       }
-      return [{ kind: "command", what: shorten(command), ...failed }];
+      return [{ kind: "command", what: shorten(commandInFolder(command, ctx.folder)), ...failed }];
     }
     case "fileChange": {
       const changes = Array.isArray(it.changes) ? it.changes : [];

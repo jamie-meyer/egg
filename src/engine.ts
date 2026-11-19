@@ -71,11 +71,45 @@ export function createEngine(deps: EngineDeps) {
   }
 
   function environmentFor(room: Room) {
+    if (room.environmentId) return { type: "reuse" as const, environmentId: room.environmentId };
     return {
       type: "host" as const,
       hostId: room.hostId,
       workspace: { type: "unmanaged" as const, path: room.folder },
     };
+  }
+
+  /** Room id to the environment its folder turned out to belong to. */
+  const learned = new Map<string, { environmentId: string; projectId: string }>();
+
+  /**
+   * Spawn a thread on the room's folder. A folder that is already one of
+   * bb's environments (a project checkout or worktree) must be reused, not
+   * opened again: learn which and remember it on the room.
+   */
+  async function spawnOn(room: Room, args: Omit<Parameters<typeof sdk.threads.spawn>[0], "environment" | "projectId"> & { prompt: string }) {
+    const known = learned.get(room.id);
+    const target = known ? { ...room, environmentId: known.environmentId, projectId: known.projectId } : room;
+    try {
+      return await sdk.threads.spawn({ ...args, projectId: target.projectId, environment: environmentFor(target) } as Parameters<typeof sdk.threads.spawn>[0]);
+    } catch (e) {
+      const match = /belongs to environment (env_[A-Za-z0-9]+)/.exec(errText(e));
+      if (!match || target.environmentId) throw e;
+      const environmentId = match[1]!;
+      let projectId = target.projectId;
+      try {
+        const env = (await sdk.environments.get({ environmentId })) as { projectId?: string };
+        if (env.projectId) projectId = env.projectId;
+      } catch {
+        // keep the room's project
+      }
+      learned.set(room.id, { environmentId, projectId });
+      await store.update(room.id, (r) => {
+        r.environmentId = environmentId;
+        r.projectId = projectId;
+      });
+      return sdk.threads.spawn({ ...args, projectId, environment: { type: "reuse", environmentId } } as Parameters<typeof sdk.threads.spawn>[0]);
+    }
   }
 
   async function createRoom(input: { folder: string; hostId: string; projectId: string; line: string; source: "typed" | "voice" | "pasted" }) {
@@ -121,9 +155,7 @@ export function createEngine(deps: EngineDeps) {
     const started = Date.now();
     let threadId: string | null = null;
     try {
-      const thread = await sdk.threads.spawn({
-        projectId: room.projectId,
-        environment: environmentFor(room),
+      const thread = await spawnOn(room, {
         providerId: settings.providerId,
         model: settings.plannerModel,
         permissionMode: settings.permissionMode,
@@ -165,9 +197,7 @@ export function createEngine(deps: EngineDeps) {
 
   async function startView(room: Room, roundId: string, line: string, view: View, settings: EngineSettings) {
     try {
-      const thread = await sdk.threads.spawn({
-        projectId: room.projectId,
-        environment: environmentFor(room),
+      const thread = await spawnOn(room, {
         providerId: settings.providerId,
         model: settings.viewModel,
         permissionMode: settings.permissionMode,

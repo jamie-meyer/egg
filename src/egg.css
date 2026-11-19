@@ -217,3 +217,4 @@
 .egg-legend dl { margin: 0; }
 .egg-legend-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 2px 0; font-size: 13px; }
 .egg-legend dd { margin: 0; }
+.egg-large-built .egg-built code { white-space: pre-wrap; overflow-wrap: anywhere; }

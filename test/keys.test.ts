@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commandFor, holdKeyCode, isEditable, moveSelection, pasteAction } from "../src/keys.ts";
+import { commandFor, holdKeyCode, isEditable, moveSelection, pasteAction, pickAt, selectionFor, tableRows } from "../src/keys.ts";
 
 test("table keys", () => {
   assert.deepEqual(commandFor({ key: "h" }, "table"), { kind: "move", dx: -1, dy: 0 });
@@ -70,4 +70,19 @@ test("the hold-to-talk key can be turned off", () => {
   assert.equal(holdKeyCode("Space"), "Space");
   assert.equal(holdKeyCode("Backquote"), "Backquote");
   assert.equal(holdKeyCode("off"), null);
+});
+
+test("j and k follow the grid as it is laid out, then reach the kept strip", () => {
+  const rows = tableRows(4, 2, 3);
+  assert.deepEqual(rows, [2, 2, 3]);
+  let sel = selectionFor(false, 0, rows, 2);
+  sel = moveSelection(sel, rows, 0, 1);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 2 });
+  sel = moveSelection(sel, rows, 1, 0);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: false, index: 3 });
+  sel = moveSelection(sel, rows, 0, 1);
+  assert.deepEqual(pickAt(sel, rows, 2), { kept: true, index: 1 });
+  assert.deepEqual(tableRows(3, 4, 0), [3, 0]);
+  assert.deepEqual(tableRows(0, 2, 1), [0, 1]);
+  assert.deepEqual(selectionFor(true, 0, [0, 1], 2), { row: 1, col: 0 });
 });

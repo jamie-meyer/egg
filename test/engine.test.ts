@@ -11,7 +11,7 @@ import { memoryKv } from "./support.ts";
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
 /** A stand-in for the parts of bb.sdk egg uses, recording every call. */
-function fakeSdk(options: { plannerReply?: string | null; plannerFails?: boolean; writes?: (threadId: string) => { name: string; content: string } | null } = {}) {
+function fakeSdk(options: { ownedBy?: string; plannerReply?: string | null; plannerFails?: boolean; writes?: (threadId: string) => { name: string; content: string } | null } = {}) {
   const calls: { method: string; args: any }[] = [];
   const meta = new Map<string, any>();
   let n = 0;
@@ -20,6 +20,7 @@ function fakeSdk(options: { plannerReply?: string | null; plannerFails?: boolean
     threads: {
       spawn: async (args: any) => {
         record("spawn", args);
+        if (options.ownedBy && args.environment.type === "host") throw new Error(`HTTP 409: This directory belongs to environment ${options.ownedBy}; reuse that environment instead.`);
         const id = `thr_${++n}`;
         meta.set(id, args.pluginMetadata);
         return { id };
@@ -48,6 +49,7 @@ function fakeSdk(options: { plannerReply?: string | null; plannerFails?: boolean
       stop: async (args: any) => record("stop", args),
       archive: async (args: any) => record("archive", args),
     },
+    environments: { get: async ({ environmentId }: any) => ({ id: environmentId, projectId: "proj_owner" }) },
     files: {
       read: async (args: any) => {
         record("files.read", args);
@@ -213,4 +215,17 @@ test("threads that are not egg's views are ignored", async () => {
   await env.engine.onThreadSettled("thr_someone_else", null);
   await env.engine.onThreadSettled("thr_1", null); // the planner
   assert.equal(env.calls.length, before);
+});
+
+test("a folder that is already a bb environment is reused, and the room remembers it", async () => {
+  const env = setup({ ownedBy: "env_abc123" });
+  const room = await roomWithRound(env);
+  const spawns = env.calls.filter((c) => c.method === "spawn").map((c) => c.args);
+  assert.equal(spawns[0].environment.type, "host");
+  assert.deepEqual(spawns[1].environment, { type: "reuse", environmentId: "env_abc123" });
+  assert.equal(spawns[1].projectId, "proj_owner");
+  assert.equal(spawns.filter((s) => s.environment.type === "host").length, 1, "only the first spawn had to learn");
+  assert.equal(roundViews(room, room.rounds[0]!).filter((v) => v.status === "running").length, 4);
+  assert.equal(room.environmentId, "env_abc123");
+  assert.equal(room.projectId, "proj_owner");
 });

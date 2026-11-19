@@ -67,3 +67,13 @@ test("counts read naturally", () => {
   assert.equal(builtFromCount([]), "nothing read");
   assert.equal(builtFromCount([{ kind: "read", what: "a" }, { kind: "read", what: "b" }, { kind: "search", what: "q" }]), "2 files read, 1 search");
 });
+
+test("commands read as run in the folder; editing the view file is writing the view", () => {
+  const entries = builtFromEvents([
+    done({ type: "commandExecution", command: "cd /work/repo; ls; wc -l /work/repo/src/*.ts" }),
+    done({ type: "commandExecution", command: "cd /work/repo && git log -3" }),
+    done({ type: "commandExecution", command: "sed -i '' 's/a/b/' \"$BB_THREAD_STORAGE/view.txt\"" }),
+    done({ type: "commandExecution", command: "grep -c x /work/repo" }),
+  ], ctx);
+  assert.deepEqual(entries.map((e) => e.what), ["ls; wc -l src/*.ts", "git log -3", "the view (thread storage)", "grep -c x ."]);
+});

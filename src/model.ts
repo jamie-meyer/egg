@@ -75,6 +75,8 @@ export const roomSchema = z.object({
   folder: z.string().max(2000),
   hostId: z.string().max(100),
   projectId: z.string().max(100),
+  /** Set when the folder is already one of bb's environments: threads reuse it. */
+  environmentId: z.string().max(100).nullable().optional(),
   /** The room's directory on disk, where kept views are written. */
   dir: z.string().max(2000),
   createdAt: z.number(),
