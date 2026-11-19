@@ -183,13 +183,20 @@ function LineInput(props: { initial: string; onSend: (text: string) => void; onL
 
 function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: string; onMade: (room: Room) => void; onCancel: () => void }) {
   const [folder, setFolder] = useState("");
+  const [project, setProject] = useState<string | null>(props.projectId);
   const [line, setLine] = useState(props.initialLine);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const lineRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    props.rpc.call("defaults", { projectId: props.projectId }).then((d) => setFolder((f) => f || d.folder || ""), () => undefined);
+    props.rpc.call("defaults", { projectId: props.projectId }).then(
+      (d) => {
+        setFolder((f) => f || d.folder || "");
+        setProject((p) => p ?? d.projectId);
+      },
+      () => undefined,
+    );
     (props.initialLine ? lineRef : folderRef).current?.focus();
   }, []);
   const submit = async () => {
@@ -197,7 +204,7 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
     if (!folder.trim() || !text) return setError("Both a folder and a first line, please.");
     setBusy(true);
     try {
-      const { room } = await props.rpc.call("room_create", { folder: folder.trim(), line: text, projectId: props.projectId, source: "typed" });
+      const { room } = await props.rpc.call("room_create", { folder: folder.trim(), line: text, projectId: project, source: "typed" });
       props.onMade(room);
     } catch (e) {
       setError(errText(e));

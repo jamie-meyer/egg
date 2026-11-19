@@ -112,7 +112,7 @@ export function createEngine(deps: EngineDeps) {
     }
   }
 
-  async function createRoom(input: { folder: string; hostId: string; projectId: string; line: string; source: "typed" | "voice" | "pasted" }) {
+  async function createRoom(input: { folder: string; hostId: string; projectId: string; environmentId?: string | null; line: string; source: "typed" | "voice" | "pasted" }) {
     const settings = await deps.settings();
     const id = newId("room");
     const room = makeRoom({
@@ -124,6 +124,7 @@ export function createEngine(deps: EngineDeps) {
       dir: roomDir(settings.roomsDir, input.line, id),
       now: Date.now(),
     });
+    room.environmentId = input.environmentId ?? null;
     addLine(room, { kind: "did", text: `Room made: reads ${input.folder}; kept views go to ${room.dir}` });
     await store.put(room);
     const roundId = await say(room.id, input.line, input.source);

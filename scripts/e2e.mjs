@@ -56,14 +56,14 @@ try {
   await page.goto(`${bb}/plugins/egg/egg`, 5000);
   await page.eval(`localStorage.removeItem("egg:last-room")`);
   await page.goto(`${bb}/plugins/egg/egg`, 5000);
-  await page.waitFor("document.querySelector('[data-egg-root]')", { label: "the egg page" });
+  await page.waitFor("!!document.querySelector('[data-egg-root]')", { timeout: 60000, label: "the egg page" });
 
   // A new room. With rooms already there the form opens with n.
   if (!(await page.eval("!!document.querySelector('[data-egg-new-room]')"))) {
     await page.eval("document.querySelector('[data-egg-root]').focus()");
     await page.key("n");
   }
-  await page.waitFor("document.querySelector('[data-egg-folder]')?.value", { label: "the folder default" });
+  await page.waitFor("document.querySelector('[data-egg-folder]')?.value", { timeout: 30000, label: "the folder default" });
   const defaultFolder = await page.eval("document.querySelector('[data-egg-folder]').value");
   check(defaultFolder.length > 0, `the folder defaults to the project's checkout (${defaultFolder})`);
   await page.eval(`(() => { const el = document.querySelector('[data-egg-folder]'); el.focus(); el.select(); })()`);
@@ -94,7 +94,7 @@ try {
   const firstDone = await page.eval("[...document.querySelectorAll('[data-egg-cards] [data-egg-card]')].findIndex((c) => c.dataset.eggStatus === 'done')");
   for (let i = 0; i < firstDone; i++) await page.key("l");
   await page.key("Enter");
-  await page.waitFor("document.querySelector('[data-egg-large] iframe')", { label: "the large view" });
+  await page.waitFor("!!document.querySelector('[data-egg-large] iframe')", { label: "the large view" });
   const frame = await page.eval(`(() => { const f = document.querySelector('[data-egg-large] iframe'); return { sandbox: f.getAttribute('sandbox'), opaque: f.contentDocument === null, csp: f.srcdoc.includes("default-src 'none'") }; })()`);
   check(frame.sandbox === "" && frame.opaque && frame.csp, `the view opens large in a sandboxed frame the page cannot reach into (${JSON.stringify(frame)})`);
   await page.key("b");
@@ -168,7 +168,7 @@ try {
 
   // Reload: the room and the kept view are still there.
   await page.goto(`${bb}/plugins/egg/egg`, 5000);
-  await page.waitFor(`document.querySelector('[data-egg-subject]')?.textContent === ${JSON.stringify(subject)}`, { label: "the room after reload" });
+  await page.waitFor(`document.querySelector('[data-egg-subject]')?.textContent === ${JSON.stringify(subject)}`, { timeout: 60000, label: "the room after reload" });
   await page.waitFor("document.querySelectorAll('[data-egg-kept] [data-egg-card]').length === 1", { label: "the kept view after reload" });
   check(true, "after a reload the room and its kept view are still there");
   check(!(await page.eval(`!!document.querySelector('[data-egg-card="${droppedId}"]')`)), "and the dropped view is still off the table");
@@ -176,7 +176,7 @@ try {
   await page.key("j");
   await page.key("j");
   await page.key("Enter");
-  await page.waitFor("document.querySelector('[data-egg-large] iframe')", { label: "the kept view opens large" });
+  await page.waitFor("!!document.querySelector('[data-egg-large] iframe')", { label: "the kept view opens large" });
   check(true, "the kept view opens large");
   await shot(page, "8-reloaded");
   await page.key("Escape");

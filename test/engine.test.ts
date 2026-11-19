@@ -229,3 +229,13 @@ test("a folder that is already a bb environment is reused, and the room remember
   assert.equal(room.environmentId, "env_abc123");
   assert.equal(room.projectId, "proj_owner");
 });
+
+test("a room made on a known environment reuses it from the first thread", async () => {
+  const env = setup();
+  await env.engine.createRoom({ folder: "/repo", hostId: "host_1", projectId: "proj_9", environmentId: "env_known", line: "x", source: "typed" });
+  await settle();
+  const spawns = env.calls.filter((c) => c.method === "spawn").map((c) => c.args);
+  assert.equal(spawns.length, 5);
+  for (const s of spawns) assert.deepEqual(s.environment, { type: "reuse", environmentId: "env_known" });
+  for (const s of spawns) assert.equal(s.projectId, "proj_9");
+});

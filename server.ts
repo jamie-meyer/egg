@@ -154,8 +154,52 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** A plugin page has no current project: use the one the person worked in last. */
+  async function recentProjectId(): Promise<string | null> {
+    try {
+      const threads = (await bb.sdk.threads.list({ limit: 50 })) as { projectId: string; updatedAt: number }[];
+      const latest = [...threads].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      return latest?.projectId ?? (await fallbackProjectId());
+    } catch {
+      return fallbackProjectId();
+    }
+  }
+
+  /**
+   * Which bb project and environment a folder belongs to: an environment
+   * whose workspace is the folder (a checkout or worktree), else a project
+   * whose checkout contains it. Threads must run in that project.
+   */
+  async function owner(folder: string, hostId: string | null): Promise<{ projectId: string; environmentId: string | null } | null> {
+    try {
+      const envs = (await bb.sdk.environments.list({ path: folder, ...(hostId ? { hostId } : {}) })) as {
+        id: string;
+        projectId: string;
+        path: string | null;
+        lifecycle?: { phase?: string };
+      }[];
+      const env = envs.find((e) => e.path === folder && (e.lifecycle?.phase ?? "active") === "active");
+      if (env) return { projectId: env.projectId, environmentId: env.id };
+    } catch {
+      // fall through to projects
+    }
+    try {
+      const projects = (await bb.sdk.projects.list()) as { id: string; sources?: { path?: string }[] }[];
+      const inside = (root: string) => folder === root || folder.startsWith(root.endsWith("/") ? root : `${root}/`);
+      const match = projects
+        .flatMap((p) => (p.sources ?? []).map((src) => ({ id: p.id, path: src.path ?? "" })))
+        .filter((src) => src.path && inside(src.path))
+        .sort((a, b) => b.path.length - a.path.length)[0];
+      if (match) return { projectId: match.id, environmentId: null };
+    } catch {
+      // no match
+    }
+    return null;
+  }
+
   bb.rpc.register(rpcContract, {
-    defaults: async ({ projectId }) => {
+    defaults: async ({ projectId: given }) => {
+      const projectId = given ?? (await recentProjectId());
       const checkout = await projectCheckout(projectId);
       const s = await engineSettings();
       return {
@@ -166,17 +210,19 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
     rooms_list: async () => ({ rooms: (await store.list()).map(summarize) }),
-    room_create: async ({ folder, line, projectId, source: from }) => {
+    room_create: async ({ folder, line, projectId: given, source: from }) => {
+      const projectId = given ?? (await recentProjectId());
       const path = expandHome(folder);
       if (!isAbsolute(path)) throw new Error("The folder must be an absolute path.");
       const info = await stat(path).catch(() => null);
       if (!info?.isDirectory()) throw new Error(`There is no folder at ${path}.`);
       const checkout = await projectCheckout(projectId);
       const hostId = checkout?.hostId ?? (await primaryHostId());
-      const project = projectId ?? (await fallbackProjectId());
+      const owned = await owner(path, hostId);
+      const project = owned?.projectId ?? projectId ?? (await fallbackProjectId());
       if (!hostId) throw new Error("bb has no machine to run views on.");
       if (!project) throw new Error("bb has no project to run views in.");
-      const { room } = await engine.createRoom({ folder: path, hostId, projectId: project, line, source: from });
+      const { room } = await engine.createRoom({ folder: path, hostId, projectId: project, environmentId: owned?.environmentId ?? null, line, source: from });
       return { room };
     },
     room_get: async ({ roomId }) => {
