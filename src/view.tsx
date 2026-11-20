@@ -936,60 +936,60 @@ export function EggPage() {
             </div>
           ) : null}
         </div>
+
+        {large ? (
+          <div className="egg-large" data-egg-large={large.id}>
+            <header className="egg-card-head">
+              <span className="egg-angle">{large.angle}</span>
+              {lineage(large) ? <span className="egg-lineage egg-small">{lineage(large)}</span> : null}
+              <span className="egg-muted egg-small">{large.focus}</span>
+              <span className="egg-spacer" />
+              <span className="egg-muted egg-small">
+                {large.model} · <kbd>y</kbd> keep <kbd>d</kbd> drop <kbd>b</kbd> built from <kbd>Esc</kbd> close
+              </span>
+            </header>
+            <div className="egg-large-body">
+              <ViewFrame content={contents[large.id]} theme={theme} title={large.angle} large />
+              {showBuilt ? (
+                <aside className="egg-large-built">
+                  <h3>Built from</h3>
+                  <BuiltFromList entries={large.builtFrom} parents={large.parents} roomId={room?.id ?? null} />
+                </aside>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {compared ? (
+          <div className="egg-large egg-compare" data-egg-compare="">
+            <header className="egg-card-head">
+              <span className="egg-angle">Compare</span>
+              <span className="egg-spacer" />
+              <span className="egg-muted egg-small">
+                <kbd>x</kbd> cross them <kbd>b</kbd> built from <kbd>Esc</kbd> close
+              </span>
+            </header>
+            <div className="egg-compare-body">
+              {compared.map((v, i) => (
+                <section key={v.id} className="egg-compare-side" data-egg-compare-side={v.id}>
+                  <header className="egg-card-head">
+                    <span className="egg-badge egg-badge-mark">{i === 0 ? "A" : "B"}</span>
+                    <span className="egg-angle">{v.angle}</span>
+                    <span className="egg-muted egg-small">round {roundOf(v)?.n ?? "?"} · {roundOf(v)?.line}</span>
+                  </header>
+                  {lineage(v) ? <p className="egg-lineage egg-small">{lineage(v)}</p> : null}
+                  <ViewFrame content={contents[v.id]} theme={theme} title={v.angle} large />
+                  {showBuilt ? (
+                    <div className="egg-compare-built">
+                      <BuiltFromList entries={v.builtFrom} parents={v.parents} roomId={room?.id ?? null} />
+                    </div>
+                  ) : null}
+                </section>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
-
-      {large ? (
-        <div className="egg-large" data-egg-large={large.id}>
-          <header className="egg-card-head">
-            <span className="egg-angle">{large.angle}</span>
-            {lineage(large) ? <span className="egg-lineage egg-small">{lineage(large)}</span> : null}
-            <span className="egg-muted egg-small">{large.focus}</span>
-            <span className="egg-spacer" />
-            <span className="egg-muted egg-small">
-              {large.model} · <kbd>y</kbd> keep <kbd>d</kbd> drop <kbd>b</kbd> built from <kbd>Esc</kbd> close
-            </span>
-          </header>
-          <div className="egg-large-body">
-            <ViewFrame content={contents[large.id]} theme={theme} title={large.angle} large />
-            {showBuilt ? (
-              <aside className="egg-large-built">
-                <h3>Built from</h3>
-                <BuiltFromList entries={large.builtFrom} parents={large.parents} roomId={room?.id ?? null} />
-              </aside>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      {compared ? (
-        <div className="egg-large egg-compare" data-egg-compare="">
-          <header className="egg-card-head">
-            <span className="egg-angle">Compare</span>
-            <span className="egg-spacer" />
-            <span className="egg-muted egg-small">
-              <kbd>x</kbd> cross them <kbd>b</kbd> built from <kbd>Esc</kbd> close
-            </span>
-          </header>
-          <div className="egg-compare-body">
-            {compared.map((v, i) => (
-              <section key={v.id} className="egg-compare-side" data-egg-compare-side={v.id}>
-                <header className="egg-card-head">
-                  <span className="egg-badge egg-badge-mark">{i === 0 ? "A" : "B"}</span>
-                  <span className="egg-angle">{v.angle}</span>
-                  <span className="egg-muted egg-small">round {roundOf(v)?.n ?? "?"} · {roundOf(v)?.line}</span>
-                </header>
-                {lineage(v) ? <p className="egg-lineage egg-small">{lineage(v)}</p> : null}
-                <ViewFrame content={contents[v.id]} theme={theme} title={v.angle} large />
-                {showBuilt ? (
-                  <div className="egg-compare-built">
-                    <BuiltFromList entries={v.builtFrom} parents={v.parents} roomId={room?.id ?? null} />
-                  </div>
-                ) : null}
-              </section>
-            ))}
-          </div>
-        </div>
-      ) : null}
 
       {mode === "rooms" ? (
         <div className="egg-sheet" data-egg-rooms="">

@@ -67,6 +67,7 @@
 .egg-voice-recording { color: var(--egg-trouble); }
 
 .egg-main {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
@@ -179,15 +180,16 @@
 .egg-card-compact { flex: 0 0 200px; }
 .egg-card-compact .egg-frame { height: 120px; }
 
-/* Over the page: a view large, rooms, a new room, the legend. */
+/* Over the page: a view large, rooms, a new room, the legend. A view large
+   and the comparison sit inside .egg-main, so they cover everything below
+   the top bar whatever its height. */
 .egg-large {
   position: absolute;
-  inset: 44px 0 0 0;
+  inset: 0;
   background: var(--egg-bg);
   display: flex;
   flex-direction: column;
   z-index: 3;
-  border-top: 1px solid var(--egg-rule);
 }
 .egg-large .egg-card-head { padding: 10px 16px; }
 .egg-large-body { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; padding: 0 16px 16px; }
