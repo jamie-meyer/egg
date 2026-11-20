@@ -318,11 +318,16 @@ rooms directory and thread title prefix, and check that:
 
 ```sh
 node scripts/copy-for-checks.mjs --out /tmp/egg-check   # plugin id egg-check
-bb plugin install /tmp/egg-check --yes
+node scripts/install-check-copy.mjs --dir /tmp/egg-check --id egg-check
 node scripts/e2e.mjs --plugin egg-check --folder <absolute folder> --only work
 bb plugin uninstall egg-check
 ```
 
+The copy is built beside its target and moved into place only once its id,
+rooms directory, title prefix and shortcut are rewritten and checked; a
+failure leaves nothing behind. Install a copy only with
+`install-check-copy.mjs`, which refuses a folder whose `package.json` says
+plugin id `egg`: installing that would replace the egg you use.
 `scripts/e2e.mjs` and `scripts/round-timing.mjs` refuse the plugin id `egg`
 unless given a long, explicit flag.
 
