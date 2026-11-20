@@ -31,11 +31,33 @@
 - **On the page.** A status line for the room thread (state, how long, its
   latest step, tokens), its chat in a pane beside the table (`t`, `i` to
   type, Escape), and `S` to stop its turn.
+- **Runs egg can vouch for.** egg puts a runner in the room thread's
+  workspace (`.egg/bin/run`). A run started through it is detached (it
+  outlives the turn), logs to `.egg/logs/`, and leaves a record in
+  `.egg/runs/` with its process id, then its exit status. egg reads the
+  records and owns each run's state: running, exit N, died, stopped. A
+  ledger line with no record is shown as claimed, never as running or
+  passed. `nohup`, which fails at once under bb's command sandbox, is no
+  longer used.
+- **Brought back to its runs.** An idle room thread with open runs is sent
+  a short message when one finishes, and every few minutes otherwise (a new
+  setting, default 10). Stopping it kills its open runs, and nothing wakes
+  it until the next line.
+- **On the page.** The status line says how many runs are open and the
+  longest; a run that fails or dies is a notebook line at once; "built
+  from" shows each cited run's state now.
+- **A page early.** The room thread puts a status page on the table after
+  its first real result and keeps it current.
+- **Routing.** A line that asks to see, show, list, summarise or explain
+  what already exists is a look, not work.
 - Model, provider and permission mode are settings per role: views,
   planning, room thread. The room thread's model defaults to the provider's
   default.
 - `scripts/copy-for-checks.mjs` makes a copy for checks under its own
-  plugin id; the end-to-end scripts refuse the id `egg` unless told.
+  plugin id, built beside its target and moved into place only once its id
+  is rewritten and checked; `scripts/install-check-copy.mjs` installs a
+  copy only if it does not say plugin id `egg`. The end-to-end scripts
+  refuse the id `egg` unless told.
 
 ## 0.1.1
 

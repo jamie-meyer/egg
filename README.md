@@ -65,16 +65,41 @@ whose results every other thread in the room uses.
 
 - **Routing.** The planning step that runs on every line also says where
   the line goes, in the same call: `look` (four views, as before), `work`
-  (to the room thread), or `both`. Work is anything that cannot be had by
-  reading: run, build, verify, measure, try, produce. The notebook says
+  (to the room thread), or `both`. Work is a request to do something new:
+  run, build, verify, measure, try, fix, produce. Asking to see, show, list,
+  summarise or explain what already exists, including what the room thread
+  has found, is a look. When unsure, it is a look. The notebook says
   `To the room thread` or `Four angles…`. `w` skips the planning step and
   sends a line straight to the room thread.
 - **It does it.** When a line asks for work, the room thread does it now
   and fully; it plans first only when the line asks for a plan. It is told
-  to run long commands in the background with a log and to check on them,
   to say what it actually ran and what it did not, and to keep its replies
   short: its output is material and pages, not prose. A work line said
   while it is busy is added to its running turn, and the notebook says so.
+- **A page early.** As soon as it has one real result, it puts a status page
+  on the table (what has run and what it showed, what is running, what has
+  not been tried) and rewrites it as things change. egg makes no pages for
+  it.
+- **Runs egg can vouch for.** egg puts a runner in its workspace,
+  `.egg/bin/run`, and the room thread starts every run that matters through
+  it: `.egg/bin/run r7 "asan build" -- 'make -j8'` starts the command
+  detached and returns at once (`--fg` waits, for short commands). The run
+  outlives the tool call and the turn that started it. Its output goes to
+  `.egg/logs/r7.log`, and `.egg/runs/r7.json` records the command, the start
+  time and the process id, then the exit status and end time. On each sync
+  egg reads those records and decides each run's state itself: *running*
+  (its process is alive), *exit N*, *died* (the process is gone and no exit
+  was recorded), or *stopped*. A ledger line with no record is shown as
+  *claimed*, never as running or passed. A run that fails or dies is a
+  notebook line at once. (Under bb's command sandbox on macOS, `nohup`
+  fails at once; a run started in a session of its own survives.)
+- **It is brought back to its runs.** While runs are open and the room
+  thread is idle, egg sends it a short message when one finishes
+  (`r14 finished, exit 0; r15 still running (14 min)`), and otherwise every
+  *Wake the room thread about open runs* minutes (default 10), so it reads
+  its logs and carries on. `S` stops its turn and kills its open runs (egg
+  knows their process ids); they are marked stopped, and nothing wakes it
+  again until your next line.
 - **Where it works: a copy of the folder**, never the folder itself unless
   you say so. The *Where the room thread works* setting:
   - `auto` (default): a copy-on-write clone, else a git worktree, else it
@@ -91,8 +116,9 @@ whose results every other thread in the room uses.
   - `in-place`: the folder itself.
 - **Material.** Everything it makes goes in `.egg/` at the top of its
   workspace, kept out of git with `.git/info/exclude` (never by editing
-  `.gitignore`): `ledger.jsonl` (one entry per run: when, what for, the
-  command, where the output is, the exit status), `notes.jsonl` (short
+  `.gitignore`): `bin/run` (egg's runner), `runs/` and `logs/` (a record
+  and a log per run), `ledger.jsonl` (one line per run, written by the
+  runner), `notes.jsonl` (short
   progress lines), `views/` (pages for the table, each with a `.json`
   beside it naming it and the ledger entries it rests on), and its scripts
   and result files. Plain files, so any provider works.
@@ -108,19 +134,20 @@ whose results every other thread in the room uses.
   line starts a fresh room thread and puts the saved material back before
   its first task.
 - **Views use it.** Once there is a room thread, view threads run in its
-  workspace, read `.egg/ledger.jsonl` first, prefer its real results over
-  deriving anything again, and say which ledger entries they rest on.
-  "Built from" lists those entries above the view's own reads and
+  workspace, are given its runs with the state egg knows for each, prefer
+  its real results over deriving anything again, and say which runs they
+  rest on. "Built from" lists those runs above the view's own reads and
   commands.
-- **"Built from" is never the model's word alone.** A ledger entry a view
-  names is checked against the commands the room thread's own events show
-  it ran; one that does not show there is marked *not in the room thread's
-  own events*.
+- **"Built from" is never the model's word alone.** Each run a page or
+  view cites shows egg's state for it now (`running 14 min`, `exit 0 after
+  3 min`, `died`, `stopped by egg`), brought up to date on every sync; a
+  run with no record is marked *claimed*.
 - **The status line.** While a room has a room thread, one line under the
   top bar says its state (`starting`, `running`, `waiting on you`,
   `failed`, `idle`), for how long, its latest step, and the tokens in its
-  context. A long silence in a running turn reads `quiet for N min`, not
-  stuck: long runs are normal here.
+  context, and how many runs are open (`2 runs open · longest 14 min`). A
+  long silence in a running turn reads `quiet for N min`, not stuck: long
+  runs are normal here.
 - **Its chat.** `t` opens the room thread's chat in a pane beside the
   table; bb's own questions and permission requests for it are answered
   there. The page keeps the keyboard until you press `i`; Escape gives it
@@ -132,6 +159,15 @@ whose results every other thread in the room uses.
 
 Set *Model for the room thread* to the best model available to you. Left
 empty, the room thread runs on the provider's default model.
+
+**Permission mode.** The room thread has its own *Permission mode for the
+room thread* setting, apart from the views'. With `auto` (the default) it
+works inside bb's workspace sandbox: it can build and run anything inside
+its copy of the folder, and anything beyond it (writing elsewhere, the
+network a build may want) goes to the provider's automatic review, which
+may refuse it or ask you in the room thread's chat (`t`). `full` lifts the
+sandbox and the review; then what it runs can change anything your user
+account can.
 
 ### Going further from a view
 
@@ -306,7 +342,8 @@ must see no request.
 `bb plugin config egg` lists them: the model, provider and permission mode
 for each role (views, the planning step, the room thread), where the room
 thread works (`auto`, `clone`, `worktree`, `in-place`), the copy-on-write
-environment provider, the largest material file copied out, the rooms
+environment provider, how often egg wakes an idle room thread with open
+runs, the largest material file copied out, the rooms
 directory, the hold-to-talk key (Space, backquote, or off), *send a pasted
 line at once*, and the prefix of thread titles. Nothing assumes one model:
 some machines cannot use the top one.
@@ -338,10 +375,11 @@ node scripts/sandbox-check.mjs   # needs Chrome
 node scripts/e2e.mjs --folder <absolute folder> [--plugin egg-check]   # needs Chrome and a running bb
 node scripts/e2e.mjs --room <room id> --only large,compare,timing   # a few sections on an existing room
 node scripts/round-timing.mjs --folder <absolute folder> [--rounds 2] [--plugin <id>]   # where a round's time goes
+node scripts/route-check.ts --project <id> --environment <id>   # how the real planning model routes test/route-cases.ts (2 threads)
 ```
 
 The whole end-to-end pass starts about 32 agent threads (the `work`
-section alone about 9, and it runs for up to 40 minutes); the sections and what
+section alone about 9, and it runs for up to 50 minutes); the sections and what
 each costs are listed at the top of `scripts/e2e.mjs`.
 
 ## Licence
