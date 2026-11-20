@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FALLBACK_ANGLES, FALLBACK_AXES, type Reference, parseAngles, plannerPrompt, referenceBlock, referenceText, viewPrompt, viewThreadTitle, viewsFor } from "../src/rounds.ts";
 import { decide, makeRoom, setAngles, startRound } from "../src/store.ts";
+import { ROUTE_CASES } from "./route-cases.ts";
 
 test("parseAngles takes four distinct angles from the reply, fenced or not", () => {
   const reply = '```json\n[{"name":"Call graph","focus":"who calls whom"},{"name":"One request","focus":"trace it"},{"name":"Sizes","focus":"numbers"},{"name":"Odd bits","focus":"surprises"},{"name":"Extra","focus":"x"}]\n```';
@@ -151,3 +152,28 @@ test("once the room has material, the view prompt reads the ledger first and the
   assert.match(plain, /The folder to look at: \/f\. It is READ ONLY/);
 });
 
+test("routing: seeing what exists is look; work needs something new done", async () => {
+  const { parseRoute, plannerPrompt, ROUTE_RULE } = await import("../src/rounds.ts");
+  assert.match(ROUTE_RULE, /"look": it asks to see, show, list, summarise, compare or explain something that already exists/);
+  assert.match(ROUTE_RULE, /what the room's working thread has already found, run or checked/);
+  assert.match(ROUTE_RULE, /"work": it asks for something new to be DONE: run, build, verify, check by running, measure, test, benchmark, try, fix/);
+  assert.match(ROUTE_RULE, /"show me what it found and checked" is look/);
+  assert.match(ROUTE_RULE, /When unsure, look\./);
+  assert.doesNotMatch(ROUTE_RULE, /a line that says verify, run, build, measure, test or try is work/, "the old tie-break, which sent 'checked' to work, is gone");
+  const room = makeRoom({ id: "room_1", subject: "verify string operations with unicode", folder: "/f", hostId: "h", projectId: "p", dir: "/d", now: 1 });
+  const replies: Record<string, (route: string) => string> = {
+    plain: (r) => `{"route":"${r}","angles":[{"name":"A","focus":"a"}]}`,
+    spaced: (r) => `{ "route" : "${r.toUpperCase()}", "angles": [] }`,
+    fenced: (r) => `\`\`\`json\n{"angles":[{"name":"A","focus":"a"}],"route":"${r}"}\n\`\`\``,
+    prose: (r) => `Here you go: {"route":"${r}","angles":[]} hope that helps`,
+  };
+  assert.ok(ROUTE_CASES.length >= 13);
+  for (const c of ROUTE_CASES) {
+    const prompt = plannerPrompt(room, c.line);
+    assert.ok(prompt.includes(`The person just said: ${JSON.stringify(c.line)}`), c.line);
+    assert.ok(prompt.includes(ROUTE_RULE), c.line);
+    for (const [form, reply] of Object.entries(replies)) assert.equal(parseRoute(reply(c.route)), c.route, `${c.line} (${form})`);
+  }
+  assert.equal(parseRoute('{"route":"work-ish"}'), "look", "an unknown route is look");
+  assert.equal(parseRoute('{"angles":[]}'), "look", "no route is look");
+});

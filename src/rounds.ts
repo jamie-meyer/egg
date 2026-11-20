@@ -184,13 +184,15 @@ export function plannerPrompt(room: Room, line: string, spec: RoundSpec = PLAIN_
 
 /**
  * Where a line goes, decided in the same planning call as its angles (no
- * extra model call). Work is what cannot be had by reading.
+ * extra model call). Work is a request to do something new; asking to see
+ * what already exists, even what the working thread made, is a look.
  */
 export const ROUTE_RULE = [
-  'Also pick the route for the line. "look": it can be answered by reading the folder; four views are made.',
-  '"work": it asks for something that cannot be had by reading: to run, build, verify, measure, try, test, benchmark or produce something. The room\'s working thread does it in a copy of the folder, for as long as it takes.',
-  '"both": it asks for work, and a quick look at the folder would also help right now.',
-  "When unsure between look and work, a line that says verify, run, build, measure, test or try is work.",
+  'Also pick the route for the line. "look": it asks to see, show, list, summarise, compare or explain something that already exists: the folder, or what the room\'s working thread has already found, run or checked. Four views are made; they read the folder and the working thread\'s results.',
+  '"work": it asks for something new to be DONE: run, build, verify, check by running, measure, test, benchmark, try, fix, reproduce, write and run a harness, or produce a result that does not exist yet. The room\'s working thread does it in a copy of the folder, for as long as it takes.',
+  '"both": it asks for new work, and a quick look at what exists would also help right now.',
+  "Decide by the verb the person wants done, not by the words around it: \"show me what it found and checked\" is look (found and checked is what already happened); \"check whether it builds\" is work. When unsure, look.",
+  'Examples: "show me what it found" → look; "list the failures so far" → look; "summarise the fuzzer results" → look; "explain why r3 failed" → look; "where is the parser?" → look; "build it and run the tests" → work; "verify every string operation" → work; "measure how long the suite takes" → work; "try it with clang" → work; "fix the failing test and rerun" → work; "run it again and show me the slowest" → work (what it shows is a new result); "build it with sanitizers, and meanwhile map where the allocator lives" → both.',
 ].join(" ");
 
 /** The route in a planner's reply, or look when it gives none. */
