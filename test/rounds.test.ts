@@ -140,7 +140,9 @@ test("once the room has material, the view prompt reads the ledger first and the
   const spec = { kind: "line" as const, refs: [], pinned: null, nonce: "n", material: { workspace: "/clones/k/f", runs: ["unit tests ×5", "build"] } };
   const v = viewPrompt(room, "which tests are slowest", { name: "A", focus: "a" }, spec);
   assert.match(v, /The folder to look at: \/clones\/k\/f, the room thread's copy of \/f\. It is READ ONLY/);
-  assert.match(v, /Read \.egg\/ledger\.jsonl first/);
+  assert.match(v, /the state egg itself knows for each/);
+  assert.match(v, /^  unit tests ×5$/m);
+  assert.match(v, /A run marked claimed has no record: never present it as passed/);
   assert.match(v, /Prefer real results in \.egg\//);
   assert.match(v, /view\.json/);
   assert.match(plannerPrompt(room, "x", spec), /its ledger has 2 runs, the latest: "unit tests ×5"; "build"/);
@@ -148,3 +150,4 @@ test("once the room has material, the view prompt reads the ledger first and the
   assert.doesNotMatch(plain, /ledger/);
   assert.match(plain, /The folder to look at: \/f\. It is READ ONLY/);
 });
+

@@ -29,7 +29,8 @@ import {
   viewSidecarSchema,
 } from "./material.ts";
 import type { LedgerRecord, Room, Worker } from "./model.ts";
-import { type EventRow, builtFromThreadPage, collectEvents, commandsRun } from "./provenance.ts";
+import { type EventRow, builtFromThreadPage, collectEvents, commandsRun, refreshLedgerEntries } from "./provenance.ts";
+import { RUNNER_PATH, RUNS_DIR, buildLedger, carryOver, installRunner, isOpen, killRun, notebookLine, openSummary, pidAlive, readRecords, wakeRule } from "./runs.ts";
 import { type WorkerStatus, deriveWorker, toActivity } from "./status.ts";
 import { type Store, type ThreadPage, addLine, startWorkRound } from "./store.ts";
 import { standingInstructions, workMessage } from "./worker.ts";
@@ -50,6 +51,8 @@ export interface RoomThreadSettings {
   cloneProviderId: string;
   /** Files in .egg/ larger than this are not copied out. */
   materialMaxBytes: number;
+  /** While runs are open and the room thread is idle, egg wakes it this often. */
+  wakeIntervalMs: number;
   titlePrefix: string;
 }
 
@@ -87,6 +90,10 @@ export interface RoomThreadDeps {
   note: (roomId: string, kind: "did" | "trouble", text: string) => Promise<void>;
   /** Waits between checks while bb makes a workspace; tests make it instant. */
   pause?: (ms: number) => Promise<void>;
+  /** Whether a process is alive, and stopping a run; tests replace them. */
+  alive?: (pid: number) => boolean | null;
+  kill?: (run: { pid?: number | undefined; pgid?: number | undefined }) => Promise<boolean>;
+  now?: () => number;
 }
 
 export interface SendResult {
@@ -97,6 +104,9 @@ export interface SendResult {
 export function createRoomThreads(deps: RoomThreadDeps) {
   const { sdk, store, publish, log, note } = deps;
   const pause = deps.pause ?? sleep;
+  const procAlive = deps.alive ?? pidAlive;
+  const kill = deps.kill ?? ((run) => killRun(run));
+  const clock = deps.now ?? Date.now;
   const syncing = new Set<string>();
   const starting = new Set<string>();
 
@@ -342,7 +352,11 @@ export function createRoomThreads(deps: RoomThreadDeps) {
       } as Parameters<typeof sdk.threads.send>[0])) as { delivery?: string };
       const queued = res.delivery === "queued";
       await store.update(roomId, (r) => {
-        if (r.worker?.threadId === worker.threadId) r.worker.sent += 1;
+        if (r.worker?.threadId === worker.threadId) {
+          r.worker.sent += 1;
+          // The person's line: egg may wake it about its runs again.
+          r.worker.held = false;
+        }
         addLine(r, {
           kind: "did",
           text: queued ? "→ queued for the room thread, behind its running turn (it shows in its chat)" : busy ? "→ sent to the room thread while it works: added to its running turn" : "→ sent to the room thread",
@@ -404,9 +418,20 @@ export function createRoomThreads(deps: RoomThreadDeps) {
     } catch (e) {
       lines.push(`Could not put the saved material back: ${errText(e)}`);
     }
+    // egg's runner, after any restore so it is always the current one.
+    try {
+      await installRunner(join(ws, MATERIAL_DIR));
+      lines.push(`egg's runner is in ${RUNNER_PATH}: runs started through it are ones egg can vouch for`);
+    } catch (e) {
+      lines.push(`Could not put egg's runner in ${RUNNER_PATH}: ${errText(e)}`);
+    }
+    // Runs from an earlier room thread are history: nothing to tell this one about.
+    const earlier = (await readRecords(join(ws, MATERIAL_DIR)).catch(() => [])).map((r) => r.record.id);
     const { result: pending } = await store.update(room.id, (r) => {
       if (r.worker?.threadId !== worker.threadId || r.worker.ready) return [];
       for (const text of lines) addLine(r, { kind: "did", text });
+      r.worker.told = [...new Set([...(r.worker.told ?? []), ...earlier])];
+      r.worker.noted = { ...(r.worker.noted ?? {}), ...Object.fromEntries(earlier.map((id) => [id, "earlier"])) };
       r.worker.ready = true;
       const waiting = r.worker.pending;
       r.worker.pending = [];
@@ -449,10 +474,15 @@ export function createRoomThreads(deps: RoomThreadDeps) {
       const seen = notes.length < worker.notesSeen ? 0 : worker.notesSeen;
       const fresh = notes.slice(seen);
 
-      // The ledger.
+      // The ledger: built from egg's run records; a ledger line with no record is only claimed.
+      if (worker.ready) await installRunner(root).catch(() => undefined);
       const ledgerFile = await readSmall(join(root, LEDGER_FILE), MAX_JSONL_BYTES);
-      const ledger: LedgerRecord[] = ledgerFile ? mergeLedger(parseJsonl(ledgerFile.content, ledgerEntrySchema).items) : [];
-      if (ledgerFile) await store.putLedger(roomId, ledger);
+      const lines = ledgerFile ? mergeLedger(parseJsonl(ledgerFile.content, ledgerEntrySchema).items) : [];
+      const records = await readRecords(root);
+      const syncNow = clock();
+      const before = await store.getLedger(roomId);
+      const ledger: LedgerRecord[] = carryOver(buildLedger(records, lines, { alive: procAlive, now: syncNow, stopped: new Set(worker.stoppedRuns ?? []) }), before, syncNow);
+      if (ledgerFile || records.length || before.length) await store.putLedger(roomId, ledger);
 
       // Pages.
       const now = Date.now();
@@ -506,9 +536,34 @@ export function createRoomThreads(deps: RoomThreadDeps) {
       }
 
       const viewIds: { id: string; content: string; format: "html" | "text" }[] = [];
+      let runNews = false;
       await store.update(roomId, (r) => {
         const w = r.worker;
         if (!w || w.threadId !== worker.threadId) return;
+        // A run that failed, died or finished is a notebook line at once, once.
+        const noted = { ...(w.noted ?? {}) };
+        for (const e of ledger) {
+          if (!e.state || noted[e.id]) continue;
+          if (e.state === "stopped") {
+            noted[e.id] = "stopped";
+            continue;
+          }
+          const said = notebookLine(e, syncNow);
+          if (!said) continue;
+          noted[e.id] = e.state;
+          addLine(r, said);
+          runNews = true;
+        }
+        w.noted = noted;
+        // "Built from" shows each cited run's state now.
+        for (const v of Object.values(r.views)) {
+          if (!v.ledger?.length) continue;
+          const next = refreshLedgerEntries(v.builtFrom, ledger, syncNow);
+          if (next) {
+            v.builtFrom = next;
+            runNews = true;
+          }
+        }
         const shown = fresh.slice(-NOTES_PER_SYNC);
         if (fresh.length > shown.length) addLine(r, { kind: "note", text: `(${fresh.length - shown.length} earlier notes from the room thread are in ${MATERIAL_DIR}/${NOTES_FILE})` });
         for (const n of shown) addLine(r, { kind: "note", text: n.text });
@@ -535,7 +590,7 @@ export function createRoomThreads(deps: RoomThreadDeps) {
         if (copy) w.syncedAt = now;
       });
       for (const v of viewIds) await store.putContent(v.id, { format: v.format, content: v.content });
-      if (fresh.length || pages.length || tooBig.length || copy?.skipped.length) publish(roomId);
+      if (fresh.length || pages.length || tooBig.length || copy?.skipped.length || runNews) publish(roomId);
     } catch (e) {
       log.warn(`sync ${roomId}: ${errText(e)}`);
     } finally {
@@ -558,7 +613,7 @@ export function createRoomThreads(deps: RoomThreadDeps) {
   }
 
   /** The status line's facts, read from bb now. */
-  async function status(roomId: string): Promise<(WorkerStatus & { threadId: string; workspace: string; kind: WorkspaceKind; ready: boolean; ledger: number }) | null> {
+  async function status(roomId: string): Promise<(WorkerStatus & { threadId: string; workspace: string; kind: WorkspaceKind; ready: boolean; ledger: number; runsOpen: number; longestOpenMs: number | null; claimed: number }) | null> {
     const room = await store.get(roomId);
     const worker = room?.worker;
     if (!room || !worker) return null;
@@ -589,19 +644,59 @@ export function createRoomThreads(deps: RoomThreadDeps) {
       : [[], [], [], null];
     const usedTokens = typeof context?.usage?.usedTokens === "number" ? context.usage.usedTokens : null;
     const derived = deriveWorker(facts, toActivity({ turns, items, interactions, usedTokens }), now, worker.startedAt);
-    const ledger = (await store.getLedger(roomId)).length;
-    return { ...derived, threadId, workspace: worker.workspace, kind: worker.kind, ready: worker.ready, ledger };
+    const entries = await store.getLedger(roomId);
+    const open = openSummary(entries, now);
+    return {
+      ...derived,
+      threadId,
+      workspace: worker.workspace,
+      kind: worker.kind,
+      ready: worker.ready,
+      ledger: entries.length,
+      runsOpen: open.open,
+      longestOpenMs: open.longestMs,
+      claimed: entries.filter((e) => e.state === "claimed").length,
+    };
   }
 
-  /** Stop the room thread's turn. It stays the room thread; the next line starts a new turn. */
+  /**
+   * Stop the room thread's turn, and every run it has open: egg knows their
+   * process ids. They are marked stopped, and nothing wakes the thread until
+   * the person's next line. It stays the room thread.
+   */
   async function stop(roomId: string): Promise<boolean> {
     const room = await store.get(roomId);
     const worker = room?.worker;
     if (!room || !worker || worker.gone) return false;
+    await store.update(roomId, (r) => {
+      if (r.worker?.threadId === worker.threadId) r.worker.held = true;
+    });
     await sdk.threads.stop({ threadId: worker.threadId });
-    await note(roomId, "did", "Stopped the room thread's turn. Its material stays; the next work line starts a new turn.");
+    // Bring the ledger up to date first, so a run started just now is known.
+    await sync(roomId);
+    const stopped = await stopRuns(roomId, worker.threadId);
+    await note(
+      roomId,
+      "did",
+      `Stopped the room thread's turn${stopped.length ? ` and its open run${stopped.length === 1 ? "" : "s"} ${stopped.join(", ")}` : ""}. Its material stays; egg wakes it for nothing until the next work line, which starts a new turn.`,
+    );
     void sync(roomId);
     return true;
+  }
+
+  /** Signal every open run of the room and mark it stopped. Returns their ids. */
+  async function stopRuns(roomId: string, threadId: string): Promise<string[]> {
+    const open = (await store.getLedger(roomId)).filter(isOpen);
+    await Promise.all(open.map((e) => kill(e).catch(() => false)));
+    const ids = open.map((e) => e.id);
+    if (!ids.length) return [];
+    await store.update(roomId, (r) => {
+      if (r.worker?.threadId !== threadId) return;
+      r.worker.stoppedRuns = [...new Set([...(r.worker.stoppedRuns ?? []), ...ids])].slice(-1000);
+    });
+    const now = clock();
+    await store.putLedger(roomId, (await store.getLedger(roomId)).map((e) => (ids.includes(e.id) ? { ...e, state: "stopped" as const, endedMs: now } : e)));
+    return ids;
   }
 
   /** The room is deleted: a last sync, then archive the room thread (bb removes its clone after). */
@@ -610,6 +705,7 @@ export function createRoomThreads(deps: RoomThreadDeps) {
     if (!worker) return;
     await sync(room.id).catch(() => undefined);
     await sdk.threads.stop({ threadId: worker.threadId }).catch(() => undefined);
+    await stopRuns(room.id, worker.threadId).catch(() => []);
     await sdk.threads.archive({ threadId: worker.threadId }).catch((e) => log.warn(`archive ${worker.threadId}: ${errText(e)}`));
   }
 
@@ -636,11 +732,68 @@ export function createRoomThreads(deps: RoomThreadDeps) {
       } catch {
         continue;
       }
-      if (busy || (worker.syncedAt ?? 0) < Date.now() - 10 * 60_000) await sync(room.id);
+      const open = (await store.getLedger(room.id)).some(isOpen);
+      // The runner writes each record by renaming it into place, so a new or finished run changes the folder's time.
+      const runsChanged = ((await lstat(join(worker.workspace, MATERIAL_DIR, RUNS_DIR)).catch(() => null))?.mtimeMs ?? 0) >= (worker.syncedAt ?? 0);
+      if (busy || open || runsChanged || (worker.syncedAt ?? 0) < Date.now() - 10 * 60_000) await sync(room.id);
+      if (!busy && worker.ready) await wake(room.id).catch((e) => log.warn(`wake ${room.id}: ${errText(e)}`));
     }
   }
 
-  return { send, start, sync, settled, status, stop, archive, tick, workspaceFacts };
+  /** When its last turn ended, from its own events. */
+  async function turnEndedAt(threadId: string): Promise<number | null> {
+    try {
+      const rows = (await sdk.threads.events.list({ threadId, order: "desc", limit: "1", types: ["turn/completed"] })) as { createdAt?: number }[];
+      return typeof rows[0]?.createdAt === "number" ? rows[0].createdAt : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Bring an idle room thread back to its runs: at once when one finished
+   * after its turn ended, and at the slow interval while runs are open.
+   * Never while the person has it stopped.
+   */
+  async function wake(roomId: string): Promise<boolean> {
+    const s = await deps.settings();
+    const room = await store.get(roomId);
+    const worker = room?.worker;
+    if (!room || !worker || worker.gone || !worker.ready || worker.held) return false;
+    const ledger = await store.getLedger(roomId);
+    const told = new Set(worker.told ?? []);
+    if (!ledger.some((e) => isOpen(e) || ((e.state === "exited" || e.state === "died") && !told.has(e.id)))) return false;
+    let idle = false;
+    try {
+      const thread = (await sdk.threads.get({ threadId: worker.threadId })) as { status?: string; hasPendingInteraction?: boolean };
+      idle = thread.status === "idle" && thread.hasPendingInteraction !== true;
+    } catch {
+      return false;
+    }
+    const now = clock();
+    const decision = wakeRule({ ledger, told, idle, held: false, turnEndedAt: idle ? await turnEndedAt(worker.threadId) : null, wokeAt: worker.wokeAt ?? null, now, intervalMs: s.wakeIntervalMs });
+    if (!decision.message && !decision.told.length) return false;
+    if (decision.message) {
+      try {
+        await sdk.threads.send({ threadId: worker.threadId, mode: "steer-if-active", input: [{ type: "text", text: decision.message }] } as Parameters<typeof sdk.threads.send>[0]);
+      } catch (e) {
+        log.warn(`wake ${worker.threadId}: ${errText(e)}`);
+        return false;
+      }
+    }
+    await store.update(roomId, (r) => {
+      if (r.worker?.threadId !== worker.threadId) return;
+      r.worker.told = [...new Set([...(r.worker.told ?? []), ...decision.told])].slice(-1000);
+      if (decision.message) {
+        r.worker.wokeAt = now;
+        addLine(r, { kind: "did", text: `Woke the room thread: ${decision.message.split("\n")[0]!.replace(/^egg: /, "")}` });
+      }
+    });
+    if (decision.message) publish(roomId);
+    return decision.message !== null;
+  }
+
+  return { send, start, sync, settled, status, stop, archive, tick, wake, workspaceFacts };
 }
 export type RoomThreads = ReturnType<typeof createRoomThreads>;
 

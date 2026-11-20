@@ -27,6 +27,9 @@ function world(options: {
   gitDir?: boolean;
   workerCommands?: string[];
   viewWrites?: Record<string, string>;
+  /** Process ids egg should see alive. */
+  alivePids?: Set<number>;
+  turnEndedAt?: number;
 } = {}) {
   const folder = mkdtempSync(join(tmpdir(), "egg-folder-"));
   if (options.gitDir) mkdirSync(join(folder, ".git"));
@@ -87,7 +90,7 @@ function world(options: {
           const t = threads.get(args.threadId);
           if (args.types?.includes("system/error")) return [{ data: { message: "Clones need macOS and APFS" } }];
           if (t?.meta?.role === "room-thread") {
-            if (args.types?.includes("turn/started")) return [{ type: "turn/completed", createdAt: Date.now() - 1000, data: { status: "completed" } }];
+            if (args.types?.includes("turn/started") || args.types?.includes("turn/completed")) return [{ type: "turn/completed", createdAt: options.turnEndedAt ?? Date.now() - 1000, data: { status: "completed" } }];
             if (args.order === "desc") return [];
             return (options.workerCommands ?? []).map((command, i) => ({ seq: i + 1, type: "item/completed", data: { item: { type: "commandExecution", command, status: "completed" } } }));
           }
@@ -114,9 +117,24 @@ function world(options: {
   };
   const store = createStore(memoryKv());
   const settings: EngineSettings = engineSettings({ roomsDir, titlePrefix: "egg test", roomThread: { providerId: "claude-code", model: "claude-opus-5-5", permissionMode: "auto" } });
-  const engine = createEngine({ sdk, store, settings: async () => settings, publish: () => undefined, log: { info() {}, warn() {} }, pause: async () => undefined });
+  const alivePids = options.alivePids ?? new Set<number>();
+  const killed: { pid?: number | undefined; pgid?: number | undefined }[] = [];
+  const engine = createEngine({
+    sdk,
+    store,
+    settings: async () => settings,
+    publish: () => undefined,
+    log: { info() {}, warn() {} },
+    pause: async () => undefined,
+    alive: (pid) => alivePids.has(pid),
+    kill: async (run) => {
+      killed.push(run);
+      if (run.pid) alivePids.delete(run.pid);
+      return true;
+    },
+  });
   const spawns = (role: string) => calls.filter((c) => c.method === "spawn" && c.args.pluginMetadata?.role === role).map((c) => c.args);
-  return { sdk, store, engine, settings, folder, roomsDir, workspaces, calls, threads, spawns };
+  return { sdk, store, engine, settings, folder, roomsDir, workspaces, calls, threads, spawns, alivePids, killed };
 }
 
 async function room(w: ReturnType<typeof world>, line = "look at it") {
@@ -182,7 +200,7 @@ test("the room thread starts in a clone of the folder, with its standing instruc
   assert.equal("model" in spawn, false, "no model: the provider's default");
   assert.equal(spawn.visibility, "visible");
   assert.match(spawn.title, /^egg test: room thread · /);
-  for (const words of [/Do what it asks now, and fully/, /Plan first only when the line asks for a plan/, /in the background/, /\.egg\/ledger\.jsonl/, /\.egg\/notes\.jsonl/, /\.egg\/views\//, /Never push/, /Never write outside your workspace/, /few lines/, /what you actually ran and what you did not/])
+  for (const words of [/Do what it asks now, and fully/, /Plan first only when the line asks for a plan/, /\.egg\/bin\/run r7 "/, /--fg/, /Never use nohup/, /without reading its record/, /egg tells you when a run finishes/, /\.egg\/ledger\.jsonl/, /\.egg\/notes\.jsonl/, /\.egg\/views\//, /Never push/, /Never write outside your workspace/, /few lines/, /what you actually ran and what you did not/])
     assert.match(spawn.prompt, words);
   const r = (await w.store.get(id))!;
   assert.equal(r.worker!.kind, "clone");
@@ -255,6 +273,9 @@ function writeMaterial(ws: string) {
     JSON.stringify({ id: "r1", exit: 0 }),
     JSON.stringify({ id: "r2", for: "made up", command: "never ran this", output: ".egg/logs/r2.log", exit: 1 }),
   ].join("\n"));
+  // r1 went through egg's runner: it has a record. r2 is only a ledger line.
+  mkdirSync(join(m, "runs"), { recursive: true });
+  writeFileSync(join(m, "runs", "r1.json"), JSON.stringify({ id: "r1", for: "unit tests run 1", command: "npm test", log: ".egg/logs/r1.log", pid: 4242, pgid: 4241, detached: true, startedAt: "2026-11-19T10:00:00.000Z", startedMs: Date.parse("2026-11-19T10:00:00Z"), exit: 0, signal: null, endedMs: Date.parse("2026-11-19T10:02:00Z") }));
   writeFileSync(join(m, "notes.jsonl"), `${JSON.stringify({ at: "x", text: "Started the five test runs" })}\n${JSON.stringify({ text: "Run 1 done: 96 tests, 0.6 s" })}\n`);
   writeFileSync(join(m, "views", "slowest.html"), "<h1>slowest tests</h1>");
   writeFileSync(join(m, "views", "slowest.json"), JSON.stringify({ title: "Slowest tests", focus: "The ten slowest tests over five runs", ledger: ["r1", "r2", "r9"] }));
@@ -277,16 +298,19 @@ test("sync: notes become notebook lines, pages become cards in a work round, the
   assert.equal(view!.status, "done");
   assert.equal(view!.file, "slowest.html");
   assert.deepEqual(view!.ledger, ["r1", "r2"], "an id not in the ledger is dropped");
-  // r1 is confirmed by the thread's own events; r2 is only its word.
+  // r1 has a run record; r2 is only its word: claimed, and never shown as failed or passed.
   assert.equal(view!.builtFrom[0]!.kind, "ledger");
-  assert.match(view!.builtFrom[0]!.what, /^r1 · unit tests run 1 · \$ npm test · exit 0/);
+  assert.match(view!.builtFrom[0]!.what, /^r1 · unit tests run 1 · \$ npm test · exit 0 after 2 min/);
   assert.equal(view!.builtFrom[0]!.unconfirmed, undefined);
+  assert.equal(view!.builtFrom[0]!.run, "r1");
   assert.equal(view!.builtFrom[1]!.unconfirmed, true);
-  assert.equal(view!.builtFrom[1]!.failed, true);
+  assert.equal(view!.builtFrom[1]!.failed, undefined);
+  assert.match(view!.builtFrom[1]!.what, /claimed: no run record/);
+  assert.doesNotMatch(view!.builtFrom[1]!.what, /exit 1/);
   assert.ok(view!.builtFrom.some((b) => b.kind === "command" && /npm test/.test(b.what)));
   assert.deepEqual(await w.store.getContent(view!.id), { format: "html", content: "<h1>slowest tests</h1>" });
   const ledger = await w.store.getLedger(id);
-  assert.deepEqual(ledger.map((e) => [e.id, e.exit, e.command]), [["r1", 0, "npm test"], ["r2", 1, "never ran this"]]);
+  assert.deepEqual(ledger.map((e) => [e.id, e.state, e.exit, e.command]), [["r1", "exited", 0, "npm test"], ["r2", "claimed", null, "never ran this"]]);
   // A second sync adds nothing.
   await w.engine.roomThread.sync(id);
   const again = (await w.store.get(id))!;
@@ -377,7 +401,9 @@ test("once there is material, views run in the room thread's environment, read t
   assert.equal(views.length, 4);
   for (const v of views) {
     assert.deepEqual(v.environment, { type: "reuse", environmentId: r0.worker!.environmentId });
-    assert.match(v.prompt, /Read \.egg\/ledger\.jsonl first/);
+    assert.match(v.prompt, /the state egg itself knows for each/);
+    assert.match(v.prompt, /r1 · unit tests run 1 · \$ npm test · exit 0/);
+    assert.match(v.prompt, /r2 · made up · \$ never ran this · claimed/);
     assert.match(v.prompt, /Prefer real results in \.egg\//);
     assert.match(v.prompt, /view\.json/);
     assert.ok(v.prompt.includes(r0.worker!.workspace));
@@ -427,4 +453,115 @@ test(".egg/ is kept out of git with info/exclude, not .gitignore", async () => {
   const exclude = readFileSync(join(w.folder, ".git", "info", "exclude"), "utf8");
   assert.match(exclude, /^\/\.egg\/$/m);
   assert.equal(existsSync(join(w.folder, ".gitignore")), false);
+});
+
+/** A run record as egg's runner writes it. */
+function writeRun(ws: string, id: string, over: Record<string, unknown> = {}) {
+  const dir = join(ws, ".egg", "runs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, for: `run ${id}`, command: `make ${id}`, log: `.egg/logs/${id}.log`, pid: 5000, pgid: 4999, detached: true, startedMs: Date.now() - 14 * 60_000, exit: null, ...over }));
+}
+const wakes = (w: ReturnType<typeof world>) => w.calls.filter((c) => c.method === "send" && /^egg: /.test(c.args.input[0].text));
+
+test("egg's runner is put in the workspace when it is ready, and the standing instructions name it", async () => {
+  const w = world({ route: "work" });
+  const id = await room(w);
+  const r = await ready(w, id);
+  const runner = join(r.worker!.workspace, ".egg", "bin", "run");
+  assert.ok(existsSync(runner));
+  assert.match(readFileSync(runner, "utf8"), /egg's runner/);
+  assert.ok(r.lines.some((l) => /egg's runner is in \.egg\/bin\/run/.test(l.text)));
+});
+
+test("sync owns run states: open runs on the status line, a run that dies or fails is a notebook line at once", async () => {
+  const w = world({ route: "work", alivePids: new Set([5000, 5001]) });
+  const id = await room(w);
+  const ws = (await ready(w, id)).worker!.workspace;
+  writeRun(ws, "r1");
+  writeRun(ws, "r2", { pid: 5001, pgid: 5001, startedMs: Date.now() - 3 * 60_000 });
+  writeRun(ws, "r3", { pid: 5002, exit: 2, endedMs: Date.now() - 1000, startedMs: Date.now() - 5000 });
+  await w.engine.roomThread.sync(id);
+  let s = (await w.engine.roomThread.status(id))!;
+  assert.equal(s.runsOpen, 2);
+  assert.ok(s.longestOpenMs! >= 14 * 60_000 && s.longestOpenMs! < 15 * 60_000);
+  let r = (await w.store.get(id))!;
+  assert.ok(r.lines.some((l) => l.kind === "trouble" && /^Run r3 failed \(run r3\): exit 2 after 4 s/.test(l.text)));
+  // r2's process goes away with no exit recorded: died, said once.
+  w.alivePids.delete(5001);
+  await w.engine.roomThread.sync(id);
+  await w.engine.roomThread.sync(id);
+  r = (await w.store.get(id))!;
+  assert.equal(r.lines.filter((l) => /^Run r2 died/.test(l.text)).length, 1);
+  assert.deepEqual((await w.store.getLedger(id)).map((e) => [e.id, e.state]), [["r1", "running"], ["r2", "died"], ["r3", "exited"]]);
+  s = (await w.engine.roomThread.status(id))!;
+  assert.equal(s.runsOpen, 1);
+});
+
+test("an idle room thread is woken when a run finishes, and at the slow interval while runs are open", async () => {
+  const w = world({ route: "work", alivePids: new Set([5000]), turnEndedAt: Date.now() - 60_000 });
+  const id = await room(w);
+  const r0 = await ready(w, id);
+  const ws = r0.worker!.workspace;
+  writeRun(ws, "r1");
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 0, "open, but its turn ended a minute ago");
+  writeRun(ws, "r2", { pid: 5003, exit: 0, startedMs: Date.now() - 30_000, endedMs: Date.now() - 1000 });
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 1);
+  assert.match(wakes(w)[0]!.args.input[0].text, /^egg: r2 finished, exit 0; r1 still running \(14 min\)\./);
+  assert.ok((await w.store.get(id))!.lines.some((l) => /^Woke the room thread: r2 finished, exit 0; r1 still running/.test(l.text)));
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 1, "told once");
+  // Not while it works.
+  w.threads.get(r0.worker!.threadId)!.status = "active";
+  writeRun(ws, "r3", { pid: 5004, exit: 1, startedMs: Date.now() - 30_000, endedMs: Date.now() - 500 });
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 1);
+  // The slow interval: with a short setting and a long-past wake.
+  w.threads.get(r0.worker!.threadId)!.status = "idle";
+  w.settings.wakeIntervalMs = 1;
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 2);
+  assert.match(wakes(w)[1]!.args.input[0].text, /r3 finished, exit 1; r1 still running/);
+});
+
+test("stop kills every open run by its process group, marks it stopped, and nothing wakes the thread until the person's next line", async () => {
+  const w = world({ route: "work", alivePids: new Set([5000, 5001]), turnEndedAt: Date.now() - 60 * 60_000 });
+  w.settings.wakeIntervalMs = 1;
+  const id = await room(w);
+  const r0 = await ready(w, id);
+  const ws = r0.worker!.workspace;
+  writeRun(ws, "r1");
+  writeRun(ws, "r2", { pid: 5001, pgid: 5001 });
+  writeRun(ws, "r0", { pid: 4000, exit: 0, endedMs: Date.now() - 2 * 60 * 60_000 });
+  await w.engine.roomThread.sync(id);
+  assert.equal(await w.engine.roomThread.stop(id), true);
+  assert.deepEqual(w.killed.map((k) => k.pgid).sort(), [4999, 5001]);
+  const r = (await w.store.get(id))!;
+  assert.equal(r.worker!.held, true);
+  assert.ok(r.lines.some((l) => /^Stopped the room thread's turn and its open runs r1, r2\./.test(l.text)));
+  await w.engine.roomThread.sync(id);
+  assert.deepEqual((await w.store.getLedger(id)).map((e) => `${e.id} ${e.state}`).sort(), ["r0 exited", "r1 stopped", "r2 stopped"]);
+  assert.equal(r.lines.filter((l) => /^Run r[12] (died|failed)/.test(l.text)).length, 0, "a stopped run is not said to have died");
+  // Idle, a run finishing, a long interval past: still nothing.
+  writeRun(ws, "r9", { pid: 5009, exit: 0, startedMs: Date.now() - 1000, endedMs: Date.now() });
+  await w.engine.roomThread.tick();
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 0);
+  // The person's next line lifts it.
+  await w.engine.work(id, "carry on", "typed");
+  await settle();
+  assert.equal((await w.store.get(id))!.worker!.held, false);
+  await w.engine.roomThread.tick();
+  assert.equal(wakes(w).length, 1);
+  assert.match(wakes(w)[0]!.args.input[0].text, /r9 finished, exit 0/);
+});
+
+test("deleting the room stops its open runs too", async () => {
+  const w = world({ route: "work", alivePids: new Set([5000]) });
+  const id = await room(w);
+  writeRun((await ready(w, id)).worker!.workspace, "r1");
+  await w.engine.roomThread.sync(id);
+  await w.engine.deleteRoom(id);
+  assert.deepEqual(w.killed.map((k) => k.pgid), [4999]);
 });

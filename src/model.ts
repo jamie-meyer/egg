@@ -21,8 +21,10 @@ export const builtFromSchema = z.object({
   /** True when the thread wrote outside its own storage: the folder was meant to be read only. */
   outside: z.boolean().optional(),
   failed: z.boolean().optional(),
-  /** A ledger entry whose command the room thread's own events do not show it running. */
+  /** A ledger entry egg cannot vouch for: claimed in the ledger with no run record. */
   unconfirmed: z.boolean().optional(),
+  /** For a ledger entry: the run's id, so its state can be brought up to date. */
+  run: z.string().max(60).optional(),
 });
 export type BuiltFrom = z.infer<typeof builtFromSchema>;
 
@@ -121,14 +123,30 @@ export const roundSchema = z.object({
 });
 export type Round = z.infer<typeof roundSchema>;
 
-/** One run the room thread recorded, as kept with the room. */
+/**
+ * A run's state, owned by egg: started, running (its process is alive),
+ * exited (with its status), died (its process gone and no exit recorded),
+ * stopped (egg stopped it when the person stopped the room thread), or
+ * claimed (a ledger line with no run record: the model's word only).
+ */
+export const runStateSchema = z.enum(["started", "running", "exited", "died", "stopped", "claimed"]);
+export type RunState = z.infer<typeof runStateSchema>;
+
+/** One run in the room's ledger, as egg built it from the run records and ledger lines. */
 export const ledgerRecordSchema = z.object({
   id: z.string().max(60),
   at: z.string().max(40),
   for: z.string().max(300),
   command: z.string().max(1000),
   output: z.string().max(400),
+  /** The exit status, only for a run egg saw exit. */
   exit: z.number().int().nullable(),
+  /** Absent in ledgers kept before egg owned run states: read as claimed. */
+  state: runStateSchema.optional(),
+  startedMs: z.number().nullable().optional(),
+  endedMs: z.number().nullable().optional(),
+  pid: z.number().int().optional(),
+  pgid: z.number().int().optional(),
 });
 export type LedgerRecord = z.infer<typeof ledgerRecordSchema>;
 
@@ -158,6 +176,16 @@ export const workerSchema = z.object({
   gone: z.boolean(),
   /** When material was last copied out. */
   syncedAt: z.number().nullable(),
+  /** Finished runs the thread was told about (or that ended while it worked). */
+  told: z.array(z.string().max(60)).max(1000).optional(),
+  /** Runs whose finish is already a notebook line, with the state said. */
+  noted: z.record(z.string(), z.string()).optional(),
+  /** Runs egg stopped because the person stopped the thread. */
+  stoppedRuns: z.array(z.string().max(60)).max(1000).optional(),
+  /** The person stopped it: egg wakes it for nothing until their next line. */
+  held: z.boolean().optional(),
+  /** When egg last woke it about its runs. */
+  wokeAt: z.number().nullable().optional(),
 });
 export type Worker = z.infer<typeof workerSchema>;
 

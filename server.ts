@@ -8,7 +8,7 @@ import { z } from "zod";
 import { type EngineSettings, type PermissionMode, createEngine } from "./src/engine.ts";
 import { DEFAULT_ROOMS_DIR, DEFAULT_TITLE_PREFIX } from "./src/identity.ts";
 import { expandHome } from "./src/kept.ts";
-import { roomSchema, roomSummarySchema, summarize, workspaceKindSchema } from "./src/model.ts";
+import { ledgerRecordSchema, roomSchema, roomSummarySchema, summarize, workspaceKindSchema } from "./src/model.ts";
 import { workspaceSetting } from "./src/workspace.ts";
 import { createStore } from "./src/store.ts";
 
@@ -57,9 +57,16 @@ export const rpcContract = defineRpcContract({
         kind: workspaceKindSchema,
         ready: z.boolean(),
         ledger: z.number(),
+        /** Runs whose process egg sees alive, and how long the oldest has run. */
+        runsOpen: z.number(),
+        longestOpenMs: z.number().nullable(),
+        /** Ledger lines with no run record. */
+        claimed: z.number(),
       })
       .nullable(),
   },
+  /** The room's runs as egg last synced them: each with the state egg owns. */
+  ledger: { input: z.object({ roomId: id }), output: z.object({ entries: z.array(ledgerRecordSchema) }) },
   /** S then y: stop the room thread's turn. */
   worker_stop: { input: z.object({ roomId: id }), output: z.object({ stopped: z.boolean() }) },
   /** m: four variations of a view along different axes. */
@@ -164,6 +171,12 @@ export default async function plugin(bb: BbPluginApi) {
       description: "The bb environment provider that makes clones, offered by another plugin when it is installed.",
       default: "cow-clone",
     },
+    wakeMinutes: {
+      type: "number",
+      label: "Wake the room thread about open runs every (minutes)",
+      description: "While the room thread has runs open and is idle, egg sends it a short message this often so it can read its logs and carry on; a run that finishes wakes it at once. Never after you stop it, until your next line.",
+      default: 10,
+    },
     materialMaxMb: {
       type: "number",
       label: "Largest material file copied out (MB)",
@@ -214,6 +227,7 @@ export default async function plugin(bb: BbPluginApi) {
       workspace: workspaceSetting(s.workspace),
       cloneProviderId: s.cloneProviderId.trim() || "cow-clone",
       materialMaxBytes: Math.round((Number.isFinite(mb) && mb > 0 ? mb : 20) * 1_000_000),
+      wakeIntervalMs: Math.round((Number.isFinite(Number(s.wakeMinutes)) && Number(s.wakeMinutes) >= 1 ? Number(s.wakeMinutes) : 10) * 60_000),
       roomsDir: s.roomsDir.trim() || DEFAULT_ROOMS_DIR,
       titlePrefix: s.threadTitlePrefix.trim() || DEFAULT_TITLE_PREFIX,
     };
@@ -357,6 +371,7 @@ export default async function plugin(bb: BbPluginApi) {
     work: async ({ roomId, text, source: from }) => ({ lineId: await engine.work(roomId, text, from) }),
     worker_status: async ({ roomId }) => engine.roomThread.status(roomId),
     worker_stop: async ({ roomId }) => ({ stopped: await engine.roomThread.stop(roomId) }),
+    ledger: async ({ roomId }) => ({ entries: await store.getLedger(roomId) }),
     more: async ({ roomId, viewId }) => ({ roundId: await engine.more(roomId, viewId) }),
     cross: async ({ roomId, a, b }) => ({ roundId: await engine.cross(roomId, a, b) }),
     zoom: async ({ roomId, viewId, part, source: from }) => ({ room: (await engine.zoom(roomId, viewId, part, from)).room }),

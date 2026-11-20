@@ -203,7 +203,7 @@ function materialLines(spec: RoundSpec): string[] {
   if (!spec.material) return [];
   const runs = spec.material.runs.slice(-10);
   return [
-    `This room has a working thread that builds and runs things in a copy of the folder; its ledger has ${spec.material.runs.length} run${spec.material.runs.length === 1 ? "" : "s"}${runs.length ? `, the latest: ${runs.map((r) => JSON.stringify(r)).join("; ")}` : ""}.`,
+    `This room has a working thread that builds and runs things in a copy of the folder; its ledger has ${spec.material.runs.length} run${spec.material.runs.length === 1 ? "" : "s"}${runs.length ? `, the latest: ${runs.map((r) => JSON.stringify(r.slice(0, 140))).join("; ")}` : ""}.`,
     "Views read its real results, so angles that look at those results are welcome.",
   ];
 }
@@ -335,7 +335,7 @@ export function viewPrompt(room: Room, line: string, angle: Angle, spec: RoundSp
     ...(spec.material
       ? [
           `The folder to look at: ${spec.material.workspace}, the room thread's copy of ${room.folder}. It is READ ONLY for you: never create, change or delete anything in it.`,
-          ...materialForViews(spec.material.workspace),
+          ...materialForViews(spec.material.workspace, spec.material.runs),
         ]
       : [`The folder to look at: ${room.folder}. It is READ ONLY: never create, change or delete anything in it.`]),
     VIEW_READING,

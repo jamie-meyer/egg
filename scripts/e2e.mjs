@@ -16,9 +16,12 @@
 //   up       back up to the parent room (-), at the view zoomed from         0
 //   rooms    the indented room list; delete the test rooms (D, u once)       0
 //   work     a room whose first line asks for work: the room thread runs     ~9
-//            it in a clone; notes, a page citing the ledger, a look line
-//            whose views cite it, the status line, stop, the chat pane,
-//            material on disk, and the folder untouched. Long: up to 40 min.
+//            it in a clone; notes, a page citing the ledger, runs through
+//            egg's runner (one that outlives its turn by 6 min and wakes the
+//            thread when it ends, one that fails at once), a look line whose
+//            views cite the ledger, the status line, stop (its open runs
+//            killed, no wake after), the chat pane, material on disk, and
+//            the folder untouched. Long: up to 50 min.
 //
 // All of it is 23 threads. To check one change with a handful, run a subset
 // with --only, and reuse a room that already has a finished round with
@@ -192,6 +195,100 @@ async function waitWatching(page, expr, timeout, label) {
     await sleep(3000);
   }
   throw new Error(`timed out: ${label}`);
+}
+
+const ledgerOf = async (roomId) => (await rpc("ledger", { roomId })).entries;
+const procAlive = (pid) => {
+  if (!pid) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM" ? true : e.code === "ESRCH" ? false : null;
+  }
+};
+async function waitFor(read, ok, timeout, every = 5000) {
+  const until = Date.now() + timeout;
+  let value = await read();
+  while (!ok(value) && Date.now() < until) {
+    await sleep(every);
+    value = await read();
+  }
+  return value;
+}
+/**
+ * Does egg's ledger tell the truth now? For each entry: running only while
+ * its process is alive and its record has no exit; exited with the
+ * record's status. Allows one sync (20 s) of lag, so call it twice apart.
+ */
+function truthNow(entries, workspace) {
+  const wrong = [];
+  for (const e of entries) {
+    if (e.state === "claimed" || e.state === "stopped") continue;
+    let record = null;
+    try {
+      record = JSON.parse(readFileSync(join(workspace, ".egg", "runs", `${e.id}.json`), "utf8"));
+    } catch {
+      wrong.push(`${e.id}: egg says ${e.state} but there is no record`);
+      continue;
+    }
+    const alive = procAlive(record.pid);
+    if (e.state === "running" && (record.exit !== null || alive === false)) wrong.push(`${e.id}: egg says running; record exit ${record.exit}, process alive ${alive}`);
+    if (e.state === "exited" && e.exit !== record.exit) wrong.push(`${e.id}: egg says exit ${e.exit}; record ${record.exit}`);
+    if (e.state === "died" && (record.exit !== null || alive === true)) wrong.push(`${e.id}: egg says died; record exit ${record.exit}, process alive ${alive}`);
+  }
+  return wrong;
+}
+
+/** Runs through egg's runner: one outlives the turn that started it by six minutes and wakes the thread; one fails at once. */
+async function runsOutliveTheTurn(page, roomId) {
+  const before = new Set((await ledgerOf(roomId)).map((e) => e.id));
+  await focusRoot(page);
+  await page.key("w");
+  await page.type("through egg's runner, start two detached runs and then end your turn at once, without waiting for either: one that sleeps 400 seconds and then writes .egg/results/long-done.txt, and one that runs `exit 3`. Note both, and add them to your status page.");
+  const asked = Date.now();
+  await page.key("Enter");
+  await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 5 * 60_000, "the run turn starts");
+  await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 10 * 60_000, "the run turn ends");
+  const turnEnded = Date.now();
+  const room = (await rpc("room_get", { roomId })).room;
+  const ws = room.worker.workspace;
+  // One sync at most after the turn ends.
+  const fresh = await waitFor(async () => (await ledgerOf(roomId)).filter((e) => !before.has(e.id)), (f) => f.some((e) => e.state === "running") && f.some((e) => e.state === "exited"), 45_000);
+  const long = fresh.find((e) => e.state === "running");
+  const short = fresh.find((e) => e.state === "exited");
+  check(!!long && procAlive(long.pid) === true, `a detached run is running after its turn ended, its process alive (${long ? `${long.id} pid ${long.pid}` : fresh.map((e) => `${e.id} ${e.state}`).join(", ")})`);
+  check(!!short && short.exit === 3, `the run that fails at once is shown as failed within one sync (${short ? `${short.id} exit ${short.exit}, ${Math.round((Date.now() - turnEnded) / 1000)} s after the turn ended` : "none"})`);
+  check(short ? (await lines(page)).some((l) => l.includes(`Run ${short.id} failed`)) : false, "its failure is a notebook line");
+  check(await page.eval("!!document.querySelector('[data-egg-runs-open]')") && /run(s)? open/.test(await page.eval("document.querySelector('[data-egg-runs-open]')?.textContent ?? ''")), `the status line says runs are open (${await page.eval("document.querySelector('[data-egg-runs-open]')?.textContent ?? ''")})`);
+  await shot(page, "w2b-runs-open");
+  if (!long) return;
+  // Watch it to the end: egg's ledger must say the truth at every look.
+  const wrongs = [];
+  let looks = 0;
+  for (;;) {
+    const entries = await ledgerOf(roomId);
+    const now = entries.find((e) => e.id === long.id);
+    const wrong = truthNow(entries, ws);
+    if (wrong.length) {
+      await sleep(25_000);
+      const again = truthNow(await ledgerOf(roomId), ws);
+      if (again.length) wrongs.push(...again.map((w) => `${new Date().toISOString()} ${w}`));
+    }
+    looks++;
+    if (now?.state !== "running" || Date.now() - asked > 12 * 60_000) break;
+    await watchState(page);
+    await sleep(15_000);
+  }
+  const ended = (await ledgerOf(roomId)).find((e) => e.id === long.id);
+  check(ended?.state === "exited" && ended.exit === 0 && ended.endedMs - ended.startedMs >= 6 * 60_000, `the long run ran to its end: ${ended?.state} exit ${ended?.exit} after ${ended ? Math.round((ended.endedMs - ended.startedMs) / 1000) : "?"} s, ${Math.round((ended?.endedMs - turnEnded) / 1000)} s after its turn ended`);
+  check(existsSync(join(ws, ".egg", "results", "long-done.txt")), "and wrote its file");
+  check(wrongs.length === 0, `egg's ledger matched the records and processes at each of ${looks} looks${wrongs.length ? `: ${wrongs.join("; ")}` : ""}`);
+  await waitWatching(page, `[...document.querySelectorAll('[data-egg-line] .egg-line-text')].some((l) => l.textContent.startsWith('Woke the room thread: ${long.id} finished, exit 0'))`, 90_000, "egg wakes the thread");
+  check(true, `egg wakes the idle thread when ${long.id} finishes`);
+  await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 90_000, "the thread comes back");
+  check(true, "the thread comes back to it");
+  await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 10 * 60_000, "and settles");
 }
 
 const steps = {
@@ -438,6 +535,7 @@ const steps = {
     await page.key("b");
     await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 30 * 60_000, "the room thread idle");
     check(seenStates.some((s) => s.state === "running") && seenStates.at(-1).state === "idle", `the status line showed running, then idle (${seenStates.map((s) => s.state).join(" → ")})`);
+    await runsOutliveTheTurn(page, roomId);
     // A look line: its views run in the room thread's environment and cite the ledger.
     await focusRoot(page);
     await page.key("i");
@@ -455,10 +553,11 @@ const steps = {
     // Stop: give it something long, then S, y.
     await focusRoot(page);
     await page.key("w");
-    await page.type("now run the whole test suite twenty more times in the background, one after another, recording each run in the ledger");
+    await page.type("now run the whole test suite twenty more times, one after another, as a single detached run through egg's runner, and keep an eye on it");
     await page.key("Enter");
     await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 5 * 60_000, "running again");
-    await sleep(20000);
+    const openBefore = await waitFor(async () => (await ledgerOf(roomId)).filter((e) => e.state === "running"), (o) => o.length > 0, 4 * 60_000);
+    check(openBefore.length > 0, `before the stop, egg's ledger has open runs (${openBefore.map((e) => `${e.id} pid ${e.pid}`).join(", ")})`);
     await focusRoot(page);
     await page.key("S");
     await page.waitFor("!!document.querySelector('[data-egg-confirm-stop]')", { label: "the stop confirm" });
@@ -466,6 +565,17 @@ const steps = {
     await page.key("y");
     await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState !== 'running' && [...document.querySelectorAll('[data-egg-line] .egg-line-text')].some((l) => /Stopped the room thread's turn/.test(l.textContent))", 3 * 60_000, "stopped");
     check(["idle", "failed"].includes(await workerState(page)) && (await lines(page)).some((l) => /Stopped the room thread's turn/.test(l)), `y stops its turn (now ${await workerState(page)})`);
+    const stoppedAt = Date.now();
+    await sleep(25_000);
+    const afterStop = await ledgerOf(roomId);
+    for (const e of openBefore) {
+      const now = afterStop.find((x) => x.id === e.id);
+      check(now?.state === "stopped" && procAlive(e.pid) === false, `${e.id} is marked stopped and its process is gone (${now?.state}, alive ${procAlive(e.pid)})`);
+    }
+    check((await lines(page)).some((l) => new RegExp(`its open runs? ${openBefore.map((e) => e.id).join(", ")}`).test(l)), "the stop line names the runs it stopped");
+    await sleep(Math.max(0, 90_000 - (Date.now() - stoppedAt)));
+    const wokeAfter = (await rpc("room_get", { roomId })).room.lines.filter((l) => /^Woke the room thread/.test(l.text) && l.at > stoppedAt);
+    check(wokeAfter.length === 0 && (await workerState(page)) !== "running", `nothing wakes it for 90 s after the stop (${wokeAfter.length} wakes, now ${await workerState(page)})`);
     // The chat pane: opens beside the table without taking the keyboard; i types in it; Escape gives it back, then closes it.
     await focusRoot(page);
     await page.key("t");

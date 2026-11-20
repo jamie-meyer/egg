@@ -1,6 +1,6 @@
 // "Built from": what a view's thread actually did, taken from the thread's
 // own event stream (completed items), never from what the model says it did.
-import type { BuiltFrom } from "./model.ts";
+import type { BuiltFrom, RunState } from "./model.ts";
 
 /** The part of a thread event row this module reads. */
 export interface EventRow {
@@ -184,13 +184,70 @@ export interface LedgerRef {
   command: string;
   output: string;
   exit: number | null;
+  /** egg's state for the run; absent in a ledger kept before egg owned run states. */
+  state?: RunState | undefined;
+  startedMs?: number | null | undefined;
+  endedMs?: number | null | undefined;
 }
 
-/** A ledger entry in one line: "r3 · unit tests ×5 · $ npm test · exit 0 · → .egg/logs/r3.log". */
-export function ledgerLine(e: LedgerRef): string {
-  const status = e.exit === null ? "running" : `exit ${e.exit}`;
+/** A run's state in a few words: "running 14 min", "exit 0 after 3 min", "died", "claimed". */
+export function stateWords(e: Pick<LedgerRef, "state" | "exit" | "startedMs" | "endedMs">, now: number): string {
+  const took = (from: number | null | undefined, to: number | null | undefined) => (from && to ? ` after ${dur(to - from)}` : "");
+  switch (e.state) {
+    case "running":
+      return `running ${e.startedMs ? dur(now - e.startedMs) : ""}`.trim();
+    case "started":
+      return "started";
+    case "exited":
+      return `exit ${e.exit}${took(e.startedMs, e.endedMs)}`;
+    case "died":
+      return "died: its process is gone and no exit was recorded";
+    case "stopped":
+      return "stopped by egg";
+    case "claimed":
+      return "claimed: no run record, so egg cannot vouch for it";
+    default:
+      return e.exit === null ? "no exit recorded" : `exit ${e.exit}`;
+  }
+}
+
+export function dur(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
+}
+
+/** A ledger entry in one line: "r3 · unit tests ×5 · $ npm test · exit 0 after 2 min · → .egg/logs/r3.log". */
+export function ledgerLine(e: LedgerRef, now = Date.now()): string {
+  const status = e.state ? stateWords({ ...e, state: e.state }, now) : e.exit === null ? "running" : `exit ${e.exit}`;
   const parts = [e.id, e.for || null, e.command ? `$ ${e.command}` : null, status, e.output ? `→ ${e.output}` : null].filter(Boolean);
   return shorten(parts.join(" · "), 400);
+}
+
+/** A ledger entry as a "built from" entry, with its state's flags. */
+export function ledgerEntry(e: LedgerRef, ranIt: boolean, now = Date.now()): BuiltFrom {
+  const failed = e.state ? e.state === "died" || (e.state === "exited" && e.exit !== 0) : e.exit !== null && e.exit !== 0;
+  const unconfirmed = e.state ? e.state === "claimed" : !ranIt;
+  return { kind: "ledger", what: ledgerLine(e, now), run: e.id, ...(unconfirmed ? { unconfirmed: true } : {}), ...(failed ? { failed: true } : {}) };
+}
+
+/** Bring the ledger entries of a "built from" list up to the runs' state now. */
+export function refreshLedgerEntries(entries: readonly BuiltFrom[], ledger: readonly LedgerRef[], now = Date.now()): BuiltFrom[] | null {
+  const byId = new Map(ledger.map((e) => [e.id, e]));
+  let changed = false;
+  const out = entries.map((b) => {
+    if (b.kind !== "ledger" || !b.run) return b;
+    const e = byId.get(b.run);
+    if (!e) return b;
+    const next = ledgerEntry(e, !b.unconfirmed, now);
+    if (next.what === b.what && next.failed === b.failed && next.unconfirmed === b.unconfirmed) return b;
+    changed = true;
+    return next;
+  });
+  return changed ? out : null;
 }
 
 const squash = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -221,9 +278,9 @@ export function ranCommand(ledgerCommand: string, ran: readonly string[]): boole
 
 /**
  * "Built from" for a view that rests on the room thread's ledger: each
- * entry named that exists, marked unconfirmed when the room thread's own
- * events do not show it running that command, then the commands those
- * events show for the entries. Names that are not in the ledger are dropped.
+ * entry named that exists, with egg's state for it (a claimed entry, one
+ * with no run record, is marked unconfirmed), then the commands the room
+ * thread's own events show for the entries. Names not in the ledger are dropped.
  */
 export function builtFromLedger(names: readonly string[], ledger: readonly LedgerRef[], workerRan: readonly string[], ctx: ProvenanceContext): { entries: BuiltFrom[]; ids: string[] } {
   const byId = new Map(ledger.map((e) => [e.id, e]));
@@ -235,8 +292,8 @@ export function builtFromLedger(names: readonly string[], ledger: readonly Ledge
     if (!e || ids.includes(e.id)) continue;
     ids.push(e.id);
     const ran = ranCommand(e.command, workerRan);
-    entries.push({ kind: "ledger", what: ledgerLine(e), ...(ran ? {} : { unconfirmed: true }), ...(e.exit !== null && e.exit !== 0 ? { failed: true } : {}) });
-    if (ran) confirmed.push(squash(e.command));
+    entries.push(ledgerEntry(e, ran));
+    if (ran && e.state !== "claimed") confirmed.push(squash(e.command));
   }
   const seen = new Set<string>();
   for (const command of workerRan) {

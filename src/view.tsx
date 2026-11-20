@@ -8,12 +8,18 @@ import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, 
 import { type BuiltFrom, type Line, type ParentRef, type Room, type RoomSummary, type Round, type View, keptViews, roomTree, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
-import { type WorkerStatus, statusLine } from "./status.ts";
+import { type WorkerStatus, duration, statusLine } from "./status.ts";
 import { type VoiceState, clipFile, createHoldToTalk, mediaRecorder } from "./voice.ts";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Content = { format: "html" | "text"; content: string };
-type WorkerInfo = WorkerStatus & { threadId: string; workspace: string; kind: "clone" | "worktree" | "in-place"; ready: boolean; ledger: number };
+type WorkerInfo = WorkerStatus & { threadId: string; workspace: string; kind: "clone" | "worktree" | "in-place"; ready: boolean; ledger: number; runsOpen: number; longestOpenMs: number | null; claimed: number };
+
+/** "2 runs open · longest 14 min", or nothing when none is. */
+function runsText(info: WorkerInfo): string {
+  if (!info.runsOpen) return "";
+  return `${info.runsOpen} run${info.runsOpen === 1 ? "" : "s"} open${info.longestOpenMs !== null ? ` · longest ${duration(info.longestOpenMs)}` : ""}`;
+}
 /** bb's chat focuses its composer when it mounts; for this long, focus is handed back to the page. */
 const CHAT_SETTLE_MS = 2500;
 
@@ -104,7 +110,7 @@ function BuiltFromList({ entries, parents = [], roomId = null }: { entries: read
           <span className="egg-built-kind">{e.kind}</span>
           <code title={e.what}>{e.what}</code>
           {e.failed ? <span className="egg-trouble"> (failed)</span> : null}
-          {e.unconfirmed ? <span className="egg-trouble"> (not in the room thread's own events)</span> : null}
+          {e.unconfirmed ? <span className="egg-trouble"> (claimed: egg has no record of this run)</span> : null}
           {e.outside ? <span className="egg-trouble"> (outside its storage)</span> : null}
         </li>
       ))}
@@ -345,8 +351,13 @@ function WorkerBar({ info, now, chatOpen, confirming }: { info: WorkerInfo; now:
     <div className={`egg-worker egg-worker-${info.state.replace(/\s+/g, "-")}`} data-egg-worker="" data-egg-worker-state={info.state} title={info.workspace}>
       <span className="egg-worker-name">room thread</span>
       <span className="egg-worker-status" data-egg-worker-line="">{statusLine(info, now)}</span>
+      {info.runsOpen ? (
+        <span className="egg-worker-runs" data-egg-runs-open={info.runsOpen}>
+          {runsText(info)}
+        </span>
+      ) : null}
       <span className="egg-muted egg-small egg-path">
-        {info.ledger} run{info.ledger === 1 ? "" : "s"} in its ledger · {where}
+        {info.ledger} run{info.ledger === 1 ? "" : "s"} in its ledger{info.claimed ? ` (${info.claimed} claimed, with no run record)` : ""} · {where}
       </span>
       <span className="egg-spacer" />
       {confirming ? (

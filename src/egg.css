@@ -261,6 +261,7 @@
 .egg-worker > .egg-path, .egg-worker > .egg-worker-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .egg-worker > .egg-spacer { flex: 1 1 0; }
 .egg-worker-name { font-weight: 700; }
+.egg-worker-runs { font-weight: 600; color: var(--egg-accent); }
 .egg-worker-running .egg-worker-name, .egg-worker-starting .egg-worker-name { color: var(--egg-accent); }
 .egg-worker-waiting-on-you .egg-worker-name, .egg-worker-failed .egg-worker-name { color: var(--egg-trouble); }
 .egg-worker-waiting-on-you .egg-worker-status { color: var(--egg-trouble); font-weight: 600; }

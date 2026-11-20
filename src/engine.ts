@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { type ParentRef, type Room, type Round, type RoundKind, type View, parentRef } from "./model.ts";
 import { removeKept, roomDir, slug, writeKept } from "./kept.ts";
-import { builtFromCount, builtFromEvents, builtFromLedger, collectEvents, commandsRun, type EventRow } from "./provenance.ts";
+import { builtFromCount, builtFromEvents, builtFromLedger, collectEvents, commandsRun, type EventRow, ledgerLine } from "./provenance.ts";
 import { type PermissionMode, type RoomThreadSettings, createRoomThreads, readWorkerMark } from "./roomthread.ts";
 import { type Angle, type Reference, type RoundSpec, fallbackFor, parseAngles, parseRoute, plannerPrompt, viewPrompt, viewThreadTitle } from "./rounds.ts";
 import type { Route } from "./model.ts";
@@ -59,6 +59,7 @@ export function engineSettings(partial: Partial<EngineSettings> & Pick<EngineSet
     workspace: "auto",
     cloneProviderId: "cow-clone",
     materialMaxBytes: 20_000_000,
+    wakeIntervalMs: 10 * 60_000,
     ...partial,
   };
 }
@@ -118,13 +119,17 @@ export interface EngineDeps {
   log: { info(m: string): void; warn(m: string): void };
   /** Waits between checks while bb makes a workspace; tests make it instant. */
   pause?: (ms: number) => Promise<void>;
+  /** Process checks and stopping runs; tests replace them. */
+  alive?: (pid: number) => boolean | null;
+  kill?: (run: { pid?: number | undefined; pgid?: number | undefined }) => Promise<boolean>;
+  now?: () => number;
 }
 
 export function createEngine(deps: EngineDeps) {
   const { sdk, store, publish, log } = deps;
   /** Views being finished right now, so an event and a reconcile do not both finish one. */
   const finishing = new Set<string>();
-  const roomThreads = createRoomThreads({ sdk, store, settings: deps.settings, publish, log, note: (roomId, kind, text) => note(roomId, kind, text), ...(deps.pause ? { pause: deps.pause } : {}) });
+  const roomThreads = createRoomThreads({ sdk, store, settings: deps.settings, publish, log, note: (roomId, kind, text) => note(roomId, kind, text), ...(deps.pause ? { pause: deps.pause } : {}), ...(deps.alive ? { alive: deps.alive } : {}), ...(deps.kill ? { kill: deps.kill } : {}), ...(deps.now ? { now: deps.now } : {}) });
 
   async function archiveThread(threadId: string) {
     await sdk.threads.stop({ threadId }).catch(() => undefined);
@@ -258,7 +263,7 @@ export function createEngine(deps: EngineDeps) {
     const w = room.worker;
     if (!w || w.gone || !w.ready || !w.environmentId || !w.workspace) return null;
     const ledger = await store.getLedger(room.id);
-    return { workspace: w.workspace, runs: ledger.map((e) => e.for || e.command).filter(Boolean) };
+    return { workspace: w.workspace, runs: ledger.map((e) => ledgerLine(e)) };
   }
 
   /** A done view in a room, or a plain-words error. */
@@ -644,7 +649,7 @@ export function createEngine(deps: EngineDeps) {
     onThreadSettled,
     reconcile,
     decideView,
-    roomThread: { status: roomThreads.status, stop: roomThreads.stop, sync: roomThreads.sync, tick: roomThreads.tick, settled: roomThreads.settled },
+    roomThread: { status: roomThreads.status, stop: roomThreads.stop, sync: roomThreads.sync, tick: roomThreads.tick, settled: roomThreads.settled, wake: roomThreads.wake },
   };
 }
 export type Engine = ReturnType<typeof createEngine>;
