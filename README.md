@@ -11,12 +11,24 @@ It is for the phase where you are still looking for the idea, or trying to
 make sense of something too big to hold in your head. Nothing in it is
 specific to one kind of folder.
 
-## Install from a checkout
+## Install
 
-You need bb 0.49 or newer and Node 22 or newer.
+You need bb 0.49 or newer.
 
 ```sh
-git clone <this repository> egg
+bb plugin install 'git:https://github.com/jamie-meyer/egg.git@^0.1.0'
+```
+
+That follows tagged releases from 0.1.0 up to, not including, 0.2.0;
+`bb plugin update egg` brings the newer ones. Rooms and settings survive an
+update.
+
+### From a checkout
+
+For changing egg itself. You also need Node 22 or newer.
+
+```sh
+git clone https://github.com/jamie-meyer/egg.git
 cd egg
 npm install --include=dev
 bb plugin install . --yes
