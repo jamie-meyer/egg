@@ -117,3 +117,34 @@ test("the view prompt asks for few batched reads, a small page and a single writ
   assert.match(prompt, /READ ONLY/);
   assert.match(prompt, /built only from what you actually read or ran/);
 });
+
+test("the planning step routes a line in the same call: look, work or both", async () => {
+  const { parseRoute, parseAngles, plannerPrompt, ROUTE_RULE } = await import("../src/rounds.ts");
+  const reply = '{"route":"work","angles":[{"name":"A","focus":"a"},{"name":"B","focus":"b"},{"name":"C","focus":"c"},{"name":"D","focus":"d"}]}';
+  assert.equal(parseRoute(reply), "work");
+  assert.deepEqual(parseAngles(reply)!.map((a) => a.name), ["A", "B", "C", "D"]);
+  assert.equal(parseRoute('{"route": "BOTH"}'), "both");
+  assert.equal(parseRoute('[{"name":"A"}]'), "look");
+  assert.equal(parseRoute(null), "look");
+  const room = makeRoom({ id: "room_1", subject: "s", folder: "/f", hostId: "h", projectId: "p", dir: "/d", now: 1 });
+  const prompt = plannerPrompt(room, "verify everything");
+  assert.ok(prompt.includes(ROUTE_RULE));
+  assert.match(prompt, /"route":"look","angles"/);
+  // Variations, crosses and zooms are never routed.
+  assert.doesNotMatch(plannerPrompt(room, "x", { kind: "zoom", refs: [], pinned: null, nonce: "n" }), /"route"/);
+});
+
+test("once the room has material, the view prompt reads the ledger first and the planner hears of it", async () => {
+  const { viewPrompt, plannerPrompt } = await import("../src/rounds.ts");
+  const room = makeRoom({ id: "room_1", subject: "s", folder: "/f", hostId: "h", projectId: "p", dir: "/d", now: 1 });
+  const spec = { kind: "line" as const, refs: [], pinned: null, nonce: "n", material: { workspace: "/clones/k/f", runs: ["unit tests ×5", "build"] } };
+  const v = viewPrompt(room, "which tests are slowest", { name: "A", focus: "a" }, spec);
+  assert.match(v, /The folder to look at: \/clones\/k\/f, the room thread's copy of \/f\. It is READ ONLY/);
+  assert.match(v, /Read \.egg\/ledger\.jsonl first/);
+  assert.match(v, /Prefer real results in \.egg\//);
+  assert.match(v, /view\.json/);
+  assert.match(plannerPrompt(room, "x", spec), /its ledger has 2 runs, the latest: "unit tests ×5"; "build"/);
+  const plain = viewPrompt(room, "x", { name: "A", focus: "a" });
+  assert.doesNotMatch(plain, /ledger/);
+  assert.match(plain, /The folder to look at: \/f\. It is READ ONLY/);
+});

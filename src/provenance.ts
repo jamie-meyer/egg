@@ -148,7 +148,9 @@ export function builtFromCount(entries: readonly BuiltFrom[]): string {
   const reads = entries.filter((e) => e.kind === "read").length;
   const searches = entries.filter((e) => e.kind === "search").length;
   const commands = entries.filter((e) => e.kind === "command").length;
+  const ledger = entries.filter((e) => e.kind === "ledger").length;
   const parts: string[] = [];
+  if (ledger) parts.push(`${ledger} ledger entr${ledger === 1 ? "y" : "ies"}`);
   if (reads) parts.push(`${reads} file${reads === 1 ? "" : "s"} read`);
   if (searches) parts.push(`${searches} search${searches === 1 ? "" : "es"}`);
   if (commands) parts.push(`${commands} command${commands === 1 ? "" : "s"}`);
@@ -173,4 +175,97 @@ export async function collectEvents(
     afterSeq = String(batch[batch.length - 1]!.seq);
   }
   return rows;
+}
+
+/** The part of a ledger entry "built from" shows. */
+export interface LedgerRef {
+  id: string;
+  for: string;
+  command: string;
+  output: string;
+  exit: number | null;
+}
+
+/** A ledger entry in one line: "r3 · unit tests ×5 · $ npm test · exit 0 · → .egg/logs/r3.log". */
+export function ledgerLine(e: LedgerRef): string {
+  const status = e.exit === null ? "running" : `exit ${e.exit}`;
+  const parts = [e.id, e.for || null, e.command ? `$ ${e.command}` : null, status, e.output ? `→ ${e.output}` : null].filter(Boolean);
+  return shorten(parts.join(" · "), 400);
+}
+
+const squash = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/** The shell commands a thread's events show it ran. */
+export function commandsRun(events: readonly EventRow[]): string[] {
+  const out: string[] = [];
+  for (const event of events) {
+    if (event.type !== "item/completed") continue;
+    const item = record(record(event.data)?.item);
+    if (item?.type !== "commandExecution") continue;
+    const command = str(item.command);
+    if (command) out.push(squash(command));
+  }
+  return out;
+}
+
+/**
+ * Whether a ledger entry's command shows in what the thread ran: the same
+ * command, or one that contains it (a wrapper such as `nohup … &` or a
+ * `cd x && …`). A ledger line alone is the model's word, not evidence.
+ */
+export function ranCommand(ledgerCommand: string, ran: readonly string[]): boolean {
+  const want = squash(ledgerCommand);
+  if (want.length < 2) return false;
+  return ran.some((c) => c === want || c.includes(want) || (want.length > 40 && c.includes(want.slice(0, 40))));
+}
+
+/**
+ * "Built from" for a view that rests on the room thread's ledger: each
+ * entry named that exists, marked unconfirmed when the room thread's own
+ * events do not show it running that command, then the commands those
+ * events show for the entries. Names that are not in the ledger are dropped.
+ */
+export function builtFromLedger(names: readonly string[], ledger: readonly LedgerRef[], workerRan: readonly string[], ctx: ProvenanceContext): { entries: BuiltFrom[]; ids: string[] } {
+  const byId = new Map(ledger.map((e) => [e.id, e]));
+  const entries: BuiltFrom[] = [];
+  const ids: string[] = [];
+  const confirmed: string[] = [];
+  for (const name of names) {
+    const e = byId.get(name);
+    if (!e || ids.includes(e.id)) continue;
+    ids.push(e.id);
+    const ran = ranCommand(e.command, workerRan);
+    entries.push({ kind: "ledger", what: ledgerLine(e), ...(ran ? {} : { unconfirmed: true }), ...(e.exit !== null && e.exit !== 0 ? { failed: true } : {}) });
+    if (ran) confirmed.push(squash(e.command));
+  }
+  const seen = new Set<string>();
+  for (const command of workerRan) {
+    if (!confirmed.some((want) => command === want || command.includes(want) || (want.length > 40 && command.includes(want.slice(0, 40))))) continue;
+    const what = shorten(commandInFolder(command, ctx.folder));
+    if (seen.has(what)) continue;
+    seen.add(what);
+    entries.push({ kind: "command", what });
+    if (entries.length >= MAX_ENTRIES) break;
+  }
+  return { entries, ids };
+}
+
+/**
+ * "Built from" for a page the room thread made itself: the ledger entries
+ * it names, checked against its events; when it names none, the commands
+ * its events show it ran (the newest), so the list never rests on its word alone.
+ */
+export function builtFromThreadPage(names: readonly string[], ledger: readonly LedgerRef[], workerRan: readonly string[], ctx: ProvenanceContext): { entries: BuiltFrom[]; ids: string[] } {
+  const named = builtFromLedger(names, ledger, workerRan, ctx);
+  if (named.ids.length > 0) return named;
+  const seen = new Set<string>();
+  const entries: BuiltFrom[] = [];
+  for (const command of [...workerRan].reverse()) {
+    const what = shorten(commandInFolder(command, ctx.folder));
+    if (seen.has(what)) continue;
+    seen.add(what);
+    entries.push({ kind: "command", what });
+    if (entries.length >= 40) break;
+  }
+  return { entries: entries.reverse(), ids: [] };
 }

@@ -5,12 +5,15 @@
 import { randomUUID } from "node:crypto";
 import {
   type BuiltFrom,
+  type LedgerRecord,
   type Line,
   type ParentRef,
   type Room,
+  type Route,
   type RoundKind,
   type Round,
   type View,
+  ledgerRecordSchema,
   parentRef,
   roomSchema,
   roundViews,
@@ -29,6 +32,9 @@ export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g,
 const roomKey = (id: string) => `room:${id}`;
 const contentKey = (viewId: string) => `content:${viewId}`;
 const deletedKey = (id: string) => `deleted:${id}`;
+const ledgerKey = (roomId: string) => `ledger:${roomId}`;
+/** The ledger kept with a room: the newest entries, well under the store's value limit. */
+export const MAX_STORED_LEDGER = 300;
 const LAST_FOLDER = "meta:last-folder";
 /** Deleted rooms are kept this long (for undo), then forgotten. */
 const DELETED_KEEP_MS = 7 * 24 * 3600 * 1000;
@@ -112,6 +118,15 @@ export function createStore(kv: Kv) {
     async putContent(viewId: string, value: ViewContent): Promise<void> {
       await kv.set(contentKey(viewId), { format: value.format, content: value.content.slice(0, MAX_CONTENT) });
     },
+    /** The room thread's ledger as last synced (its full copy is in the room's material directory). */
+    async putLedger(roomId: string, entries: readonly LedgerRecord[]): Promise<void> {
+      await kv.set(ledgerKey(roomId), entries.slice(-MAX_STORED_LEDGER));
+    },
+    async getLedger(roomId: string): Promise<LedgerRecord[]> {
+      const value = await kv.get<unknown>(ledgerKey(roomId));
+      const parsed = ledgerRecordSchema.array().safeParse(value);
+      return parsed.success ? parsed.data : [];
+    },
     async getContent(viewId: string): Promise<ViewContent | null> {
       const value = await kv.get<ViewContent>(contentKey(viewId));
       if (!value || typeof value.content !== "string") return null;
@@ -167,6 +182,8 @@ export function startRound(
     kind?: RoundKind;
     parents?: ParentRef[];
     now?: number;
+    /** Leave earlier rounds alone for now: a line's route is not known until its planning step answers. */
+    deferSupersede?: boolean;
   },
 ): { round: Round; superseded: View[] } {
   const now = input.now ?? Date.now();
@@ -177,7 +194,7 @@ export function startRound(
   const line = addLine(room, { kind: "said", text: input.text, source: input.source, roundId, at: now });
   const pinned = parents.find((p) => p.role === "pinned");
   if (pinned) addLine(room, { kind: "did", text: `with pinned "${pinned.angle}" (round ${pinned.round}) as reference`, roundId, at: now });
-  const superseded = supersede(room);
+  const superseded = input.deferSupersede ? [] : supersede(room);
   const round: Round = {
     id: roundId,
     n: room.rounds.length + 1,
@@ -193,6 +210,83 @@ export function startRound(
   };
   room.rounds.push(round);
   return { round, superseded };
+}
+
+/**
+ * The planning step routed a line. Work only: its round is taken off the
+ * table again (the earlier round shows as before), and the line stays in
+ * the notebook, marked as sent to the room thread.
+ */
+export function routeLine(room: Room, roundId: string, route: Route): Line | null {
+  const line = room.lines.find((l) => l.kind === "said" && l.roundId === roundId) ?? null;
+  if (line) line.route = route;
+  if (route === "work") {
+    room.rounds = room.rounds.filter((r) => r.id !== roundId);
+    for (const l of room.lines) if (l.roundId === roundId) delete l.roundId;
+  }
+  return line;
+}
+
+/** A line said straight to the room thread (no planning step, no round). */
+export function addWorkLine(room: Room, text: string, source: "typed" | "voice" | "pasted", now = Date.now()): Line {
+  return addLine(room, { kind: "said", text, source, route: "work", at: now });
+}
+
+/** A page the room thread put in .egg/views/, as it lands on the table. */
+export interface ThreadPage {
+  file: string;
+  title: string;
+  focus: string;
+  format: "html" | "text";
+  ledger: string[];
+  builtFrom: BuiltFrom[];
+  model: string;
+}
+
+/**
+ * Pages from the room thread land in a round of their own kind. It is done
+ * as it lands, and it supersedes nothing: views of a round still running
+ * keep running.
+ */
+export function startWorkRound(room: Room, pages: readonly ThreadPage[], now = Date.now()): { round: Round; views: View[] } {
+  const roundId = newId("rd");
+  const names = pages.map((p) => `"${p.title}"`).join(", ");
+  const line = addLine(room, { kind: "did", text: `The room thread put ${pages.length === 1 ? "a page" : `${pages.length} pages`} on the table: ${names}`.slice(0, 4000), roundId, at: now });
+  const views = pages.map((page, slot): View => ({
+    id: newId("vw"),
+    roundId,
+    slot,
+    angle: page.title.slice(0, 120),
+    focus: page.focus.slice(0, 400),
+    model: page.model.slice(0, 100),
+    threadId: null,
+    status: "done",
+    format: page.format,
+    error: null,
+    builtFrom: page.builtFrom,
+    startedAt: now,
+    finishedAt: now,
+    decision: null,
+    keptPath: null,
+    archived: false,
+    ledger: page.ledger,
+    file: page.file.slice(0, 200),
+  }));
+  for (const view of views) room.views[view.id] = view;
+  const round: Round = {
+    id: roundId,
+    n: room.rounds.length + 1,
+    lineId: line.id,
+    line: "from the room thread",
+    at: now,
+    status: "done",
+    plannerModel: "",
+    kind: "work",
+    planNote: null,
+    viewIds: views.map((v) => v.id),
+  };
+  room.rounds.push(round);
+  return { round, views };
 }
 
 /** Views of earlier rounds whose threads should now be archived; marks them archived. */

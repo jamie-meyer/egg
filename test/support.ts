@@ -2,7 +2,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type EngineSettings, createEngine } from "../src/engine.ts";
+import { type EngineSettings, createEngine, engineSettings } from "../src/engine.ts";
 import { type Kv, createStore } from "../src/store.ts";
 
 export function memoryKv(): Kv & { data: Map<string, unknown> } {
@@ -87,7 +87,7 @@ export function setup(options: Parameters<typeof fakeSdk>[0] = {}) {
   const fake = fakeSdk(options);
   const store = createStore(memoryKv());
   const roomsDir = mkdtempSync(join(tmpdir(), "egg-test-"));
-  const settings: EngineSettings = { viewModel: "claude-sonnet-5-5", plannerModel: "claude-haiku-5-5", providerId: "claude-code", permissionMode: "auto", roomsDir, titlePrefix: "egg test" };
+  const settings: EngineSettings = engineSettings({ roomsDir, titlePrefix: "egg test" });
   const published: string[] = [];
   const engine = createEngine({ sdk: fake.sdk, store, settings: async () => settings, publish: (id) => published.push(id), log: { info() {}, warn() {} } });
   return { ...fake, store, engine, roomsDir, published };

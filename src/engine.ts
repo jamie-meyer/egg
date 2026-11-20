@@ -6,8 +6,10 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { type ParentRef, type Room, type Round, type RoundKind, type View, parentRef } from "./model.ts";
 import { removeKept, roomDir, slug, writeKept } from "./kept.ts";
-import { builtFromCount, builtFromEvents, collectEvents, type EventRow } from "./provenance.ts";
-import { type Angle, type Reference, type RoundSpec, fallbackFor, parseAngles, plannerPrompt, viewPrompt, viewThreadTitle } from "./rounds.ts";
+import { builtFromCount, builtFromEvents, builtFromLedger, collectEvents, commandsRun, type EventRow } from "./provenance.ts";
+import { type PermissionMode, type RoomThreadSettings, createRoomThreads, readWorkerMark } from "./roomthread.ts";
+import { type Angle, type Reference, type RoundSpec, fallbackFor, parseAngles, parseRoute, plannerPrompt, viewPrompt, viewThreadTitle } from "./rounds.ts";
+import type { Route } from "./model.ts";
 import {
   type Store,
   addLine,
@@ -17,6 +19,8 @@ import {
   findViewRound,
   makeRoom,
   newId,
+  addWorkLine,
+  routeLine,
   setAngles,
   setPin,
   startRound,
@@ -25,15 +29,38 @@ import {
   viewStarted,
 } from "./store.ts";
 
-export type PermissionMode = "auto" | "accept-edits" | "full";
+export type { PermissionMode } from "./roomthread.ts";
 
-export interface EngineSettings {
+export interface EngineSettings extends RoomThreadSettings {
   viewModel: string;
   plannerModel: string;
+  /** The views' provider and permission mode. */
   providerId: string;
   permissionMode: PermissionMode;
+  /** The planning step's provider and permission mode. */
+  plannerProviderId: string;
+  plannerPermissionMode: PermissionMode;
   roomsDir: string;
   titlePrefix: string;
+}
+
+/** Settings for tests and for any field a caller leaves out. */
+export function engineSettings(partial: Partial<EngineSettings> & Pick<EngineSettings, "roomsDir">): EngineSettings {
+  const providerId = partial.providerId ?? "claude-code";
+  return {
+    viewModel: "claude-sonnet-5-5",
+    plannerModel: "claude-haiku-5-5",
+    providerId,
+    permissionMode: "auto",
+    plannerProviderId: providerId,
+    plannerPermissionMode: "auto",
+    titlePrefix: "egg",
+    roomThread: { providerId, model: "", permissionMode: "auto" },
+    workspace: "auto",
+    cloneProviderId: "cow-clone",
+    materialMaxBytes: 20_000_000,
+    ...partial,
+  };
 }
 
 /** What egg writes in its own metadata namespace on each thread it starts. */
@@ -55,8 +82,9 @@ export function readMark(value: unknown): ThreadMark | null {
 const PLANNER_TIMEOUT_MS = 90_000;
 
 /** The notebook line once a round's angles are picked. */
-export function plannedLine(kind: RoundKind, views: readonly View[], ms: number): string {
+export function plannedLine(kind: RoundKind, views: readonly View[], ms: number, route: Route = "look"): string {
   const took = `${Math.round(ms / 1000)} s`;
+  if (route === "both") return `Both: to the room thread, and four angles in ${took}: ${views.map((v) => v.angle).join(" · ")}`;
   if (kind === "more") return `Four axes in ${took}: ${views.map((v) => `${v.axis ?? "?"} → ${v.angle}`).join(" · ")}`;
   if (kind === "cross") return `Two ways in ${took}: ${views.map((v) => `${v.axis ?? "?"} → ${v.angle}`).join(" · ")}`;
   return `Four angles in ${took}: ${views.map((v) => v.angle).join(" · ")}`;
@@ -88,12 +116,15 @@ export interface EngineDeps {
   settings: () => Promise<EngineSettings>;
   publish: (roomId: string) => void;
   log: { info(m: string): void; warn(m: string): void };
+  /** Waits between checks while bb makes a workspace; tests make it instant. */
+  pause?: (ms: number) => Promise<void>;
 }
 
 export function createEngine(deps: EngineDeps) {
   const { sdk, store, publish, log } = deps;
   /** Views being finished right now, so an event and a reconcile do not both finish one. */
   const finishing = new Set<string>();
+  const roomThreads = createRoomThreads({ sdk, store, settings: deps.settings, publish, log, note: (roomId, kind, text) => note(roomId, kind, text), ...(deps.pause ? { pause: deps.pause } : {}) });
 
   async function archiveThread(threadId: string) {
     await sdk.threads.stop({ threadId }).catch(() => undefined);
@@ -177,7 +208,7 @@ export function createEngine(deps: EngineDeps) {
   ): Promise<string> {
     const settings = await deps.settings();
     const { room, result } = await store.update(roomId, (r) =>
-      startRound(r, { ...input, plannerModel: settings.plannerModel }),
+      startRound(r, { ...input, plannerModel: settings.plannerModel, deferSupersede: input.kind === "line" }),
     );
     publish(roomId);
     for (const view of result.superseded) if (view.threadId) void archiveThread(view.threadId);
@@ -218,7 +249,16 @@ export function createEngine(deps: EngineDeps) {
       refs,
       pinned: pin ? await reference(pin, room) : null,
       nonce: randomUUID().replace(/-/g, "").slice(0, 16),
+      material: await materialFor(room),
     };
+  }
+
+  /** The room thread's workspace and ledger, once it has one views can read. */
+  async function materialFor(room: Room): Promise<RoundSpec["material"]> {
+    const w = room.worker;
+    if (!w || w.gone || !w.ready || !w.environmentId || !w.workspace) return null;
+    const ledger = await store.getLedger(room.id);
+    return { workspace: w.workspace, runs: ledger.map((e) => e.for || e.command).filter(Boolean) };
   }
 
   /** A done view in a room, or a plain-words error. */
@@ -292,6 +332,8 @@ export function createEngine(deps: EngineDeps) {
     } catch {
       return false;
     }
+    const before = await store.get(roomId);
+    if (before?.worker) await roomThreads.archive(before).catch(() => undefined);
     const removed = await store.remove(roomId);
     for (const t of threads) void archiveThread(t);
     publish(roomId);
@@ -310,16 +352,16 @@ export function createEngine(deps: EngineDeps) {
     publish(roomId);
   }
 
-  async function plan(room: Room, roundId: string, settings: EngineSettings, spec: RoundSpec): Promise<{ angles: Angle[]; note: string | null; ms: number }> {
+  async function plan(room: Room, roundId: string, settings: EngineSettings, spec: RoundSpec): Promise<{ angles: Angle[]; note: string | null; ms: number; route: Route }> {
     const round = findRound(room, roundId);
     const fallback = fallbackFor(spec.kind);
     const started = Date.now();
     let threadId: string | null = null;
     try {
       const thread = await spawnOn(room, {
-        providerId: settings.providerId,
+        providerId: settings.plannerProviderId,
         model: settings.plannerModel,
-        permissionMode: settings.permissionMode,
+        permissionMode: settings.plannerPermissionMode,
         title: `${settings.titlePrefix}: planning · ${room.subject.slice(0, 40)}`,
         visibility: "hidden",
         prompt: plannerPrompt(room, round.line, spec),
@@ -329,13 +371,14 @@ export function createEngine(deps: EngineDeps) {
       await sdk.threads.wait({ threadId, status: "idle", timeoutMs: PLANNER_TIMEOUT_MS });
       const output = await sdk.threads.output({ threadId });
       const text = output.output ?? "";
+      const route: Route = spec.kind === "line" ? parseRoute(text) : "look";
       const angles = parseAngles(text, spec.kind);
-      if (angles === null) return { angles: fallback, note: "The planning step gave no usable angles; egg used its own spread.", ms: Date.now() - started };
+      if (angles === null) return { angles: fallback, note: route === "work" ? null : "The planning step gave no usable angles; egg used its own spread.", ms: Date.now() - started, route };
       const added = angles.filter((a) => fallback.includes(a)).length;
       const note = added > 0 ? `The planning step gave ${angles.length - added} distinct ${spec.kind === "line" || spec.kind === "zoom" ? "angles" : spec.kind === "more" ? "axes" : "ways"}; egg added ${added} of its own.` : null;
-      return { angles, note, ms: Date.now() - started };
+      return { angles, note, ms: Date.now() - started, route };
     } catch (e) {
-      return { angles: fallback, note: `The planning step failed (${errText(e)}); egg used its own spread.`, ms: Date.now() - started };
+      return { angles: fallback, note: `The planning step failed (${errText(e)}); egg used its own spread.`, ms: Date.now() - started, route: "look" };
     } finally {
       if (threadId) void archiveThread(threadId);
     }
@@ -343,10 +386,22 @@ export function createEngine(deps: EngineDeps) {
 
   async function runRound(room: Room, roundId: string, settings: EngineSettings, spec: RoundSpec) {
     const planned = await plan(room, roundId, settings, spec);
+    if (planned.route === "work" || planned.route === "both") {
+      const { result: line } = await store.update(room.id, (r) => {
+        const said = routeLine(r, roundId, planned.route);
+        if (planned.route === "work") addLine(r, { kind: "did", text: `To the room thread (routed in ${seconds(planned.ms)})` });
+        return said;
+      });
+      publish(room.id);
+      if (line) void roomThreads.send(room.id, line.text, line.id, planned.route === "both").catch((e) => note(room.id, "trouble", `The room thread: ${errText(e)}`));
+      if (planned.route === "work") return;
+    }
     const { room: updated, result: views } = await store.update(room.id, (r) => {
+      const superseded = spec.kind === "line" ? supersede(r).filter((v) => v.roundId !== roundId) : [];
+      for (const view of superseded) if (view.threadId) void archiveThread(view.threadId);
       const vs = setAngles(r, roundId, planned.angles, settings.viewModel, planned.note);
       if (planned.note) addLine(r, { kind: "trouble", text: planned.note, roundId });
-      addLine(r, { kind: "did", text: plannedLine(spec.kind, vs, planned.ms), roundId });
+      addLine(r, { kind: "did", text: plannedLine(spec.kind, vs, planned.ms, planned.route), roundId });
       return vs;
     });
     publish(room.id);
@@ -356,17 +411,33 @@ export function createEngine(deps: EngineDeps) {
   }
 
   async function startView(room: Room, roundId: string, line: string, view: View, settings: EngineSettings, spec: RoundSpec) {
+    const angle = { name: view.angle, focus: view.focus, ...(view.axis ? { axis: view.axis } : {}) };
+    const base = {
+      providerId: settings.providerId,
+      model: settings.viewModel,
+      permissionMode: settings.permissionMode,
+      title: viewThreadTitle(settings.titlePrefix, view.angle, room.subject),
+      visibility: "hidden" as const,
+      pluginMetadata: { roomId: room.id, roundId, viewId: view.id, role: "view" },
+    };
     try {
-      const thread = await spawnOn(room, {
-        providerId: settings.providerId,
-        model: settings.viewModel,
-        permissionMode: settings.permissionMode,
-        title: viewThreadTitle(settings.titlePrefix, view.angle, room.subject),
-        visibility: "hidden",
-        prompt: viewPrompt(room, line, { name: view.angle, focus: view.focus, ...(view.axis ? { axis: view.axis } : {}) }, spec),
-        pluginMetadata: { roomId: room.id, roundId, viewId: view.id, role: "view" },
+      let thread: { id: string } | null = null;
+      let usedMaterial = false;
+      const envId = room.worker?.environmentId;
+      if (spec.material && envId) {
+        try {
+          thread = await sdk.threads.spawn({ ...base, projectId: room.projectId, prompt: viewPrompt(room, line, angle, spec), environment: { type: "reuse", environmentId: envId } } as Parameters<typeof sdk.threads.spawn>[0]);
+          usedMaterial = true;
+        } catch (e) {
+          log.warn(`view in the room thread's environment: ${errText(e)}`);
+        }
+      }
+      thread ??= await spawnOn(room, { ...base, prompt: viewPrompt(room, line, angle, { ...spec, material: null }) });
+      const started = thread;
+      await store.update(room.id, (r) => {
+        const v = viewStarted(r, view.id, started.id, null);
+        if (usedMaterial) v.ledger = [];
       });
-      await store.update(room.id, (r) => viewStarted(r, view.id, thread.id, null));
     } catch (e) {
       await store.update(room.id, (r) => {
         const wasDone = findRound(r, roundId).status === "done";
@@ -397,6 +468,28 @@ export function createEngine(deps: EngineDeps) {
     return { error: "the thread finished without writing a view", storageRoot: root };
   }
 
+  /** The ledger ids a view says it rests on, from view.json in its storage. */
+  async function readRestsOn(threadId: string, storageRoot: string | null): Promise<string[]> {
+    if (!storageRoot) return [];
+    try {
+      const location = await sdk.threads.storageLocation({ threadId });
+      const f = await sdk.files.read({ path: `${storageRoot}/view.json`, hostId: location.hostId });
+      const text = f.contentEncoding === "base64" ? Buffer.from(f.content, "base64").toString("utf8") : f.content;
+      const parsed = JSON.parse(text) as { ledger?: unknown };
+      return Array.isArray(parsed.ledger) ? parsed.ledger.filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 60)).slice(0, 100) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function workerEvents(threadId: string): Promise<EventRow[]> {
+    try {
+      return await collectEvents((page) => sdk.threads.events.list({ threadId, limit: "100", types: ["item/completed"], ...page }) as Promise<EventRow[]>, 100);
+    } catch {
+      return [];
+    }
+  }
+
   /** A view's thread went idle or failed: read what it wrote and what it did. */
   async function finishView(roomId: string, viewId: string, failure: string | null) {
     if (finishing.has(viewId)) return;
@@ -416,12 +509,24 @@ export function createEngine(deps: EngineDeps) {
       } catch (e) {
         log.warn(`events for ${threadId}: ${errText(e)}`);
       }
-      const builtFrom = builtFromEvents(events, { folder: room.folder, storageRoot: file.storageRoot });
+      const usedMaterial = view.ledger !== undefined && room.worker?.workspace;
+      const folder = usedMaterial ? room.worker!.workspace : room.folder;
+      let builtFrom = builtFromEvents(events, { folder, storageRoot: file.storageRoot });
+      let ledgerIds: string[] | undefined;
+      if (usedMaterial) {
+        const named = await readRestsOn(threadId, file.storageRoot);
+        const ledger = await store.getLedger(roomId);
+        const ran = named.length ? commandsRun(await workerEvents(room.worker!.threadId)) : [];
+        const fromLedger = builtFromLedger(named, ledger, ran, { folder, storageRoot: null });
+        ledgerIds = fromLedger.ids;
+        builtFrom = [...fromLedger.entries, ...builtFrom.filter((b) => !(b.kind === "wrote" && /view\.json/.test(b.what)))];
+      }
       const error = "error" in file ? (failure ? `${failure}; ${file.error}` : file.error) : null;
       if ("content" in file) await store.putContent(viewId, { format: file.format, content: file.content });
       await store.update(roomId, (r) => {
         const wasDone = findRound(r, view.roundId).status === "done";
         const v = viewFinished(r, viewId, { format: "content" in file ? file.format : null, builtFrom, error });
+        if (ledgerIds) v.ledger = ledgerIds;
         const took = v.startedAt ? seconds((v.finishedAt ?? Date.now()) - v.startedAt) : "?";
         addLine(r, error
           ? { kind: "trouble", text: `"${v.angle}" failed after ${took}: ${error}`, roundId: v.roundId }
@@ -439,7 +544,13 @@ export function createEngine(deps: EngineDeps) {
   async function onThreadSettled(threadId: string, failure: string | null) {
     let mark: ThreadMark | null = null;
     try {
-      mark = readMark(await sdk.threads.getPluginMetadata({ threadId }));
+      const raw = await sdk.threads.getPluginMetadata({ threadId } as Parameters<typeof sdk.threads.getPluginMetadata>[0]);
+      if (readWorkerMark(raw)) {
+        if (failure) await roomThreadFailed(readWorkerMark(raw)!.roomId, threadId, failure);
+        await roomThreads.settled(threadId);
+        return;
+      }
+      mark = readMark(raw);
     } catch {
       return;
     }
@@ -503,6 +614,37 @@ export function createEngine(deps: EngineDeps) {
     return (await store.get(roomId))!;
   }
 
-  return { createRoom, say, more, cross, zoom, pin, deleteRoom, restoreRoom, note, finishView, onThreadSettled, reconcile, decideView };
+  /** w: a line straight to the room thread, with no planning step and no round. */
+  async function work(roomId: string, text: string, source: "typed" | "voice" | "pasted") {
+    const { result: line } = await store.update(roomId, (r) => addWorkLine(r, text, source));
+    publish(roomId);
+    void roomThreads.send(roomId, text, line.id, false).catch((e) => note(roomId, "trouble", `The room thread: ${errText(e)}`));
+    return line.id;
+  }
+
+  /** The room thread's turn failed: say so once, with bb's reason. */
+  async function roomThreadFailed(roomId: string, threadId: string, failure: string) {
+    const room = await store.get(roomId);
+    if (room?.worker?.threadId !== threadId) return;
+    await note(roomId, "trouble", `The room thread's turn failed: ${failure}`);
+  }
+
+  return {
+    createRoom,
+    say,
+    work,
+    more,
+    cross,
+    zoom,
+    pin,
+    deleteRoom,
+    restoreRoom,
+    note,
+    finishView,
+    onThreadSettled,
+    reconcile,
+    decideView,
+    roomThread: { status: roomThreads.status, stop: roomThreads.stop, sync: roomThreads.sync, tick: roomThreads.tick, settled: roomThreads.settled },
+  };
 }
 export type Engine = ReturnType<typeof createEngine>;

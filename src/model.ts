@@ -9,13 +9,20 @@ const id = z.string().min(1).max(100);
 
 /** One thing a view's thread did, read from its own event stream. */
 export const builtFromSchema = z.object({
-  /** read: a file opened; search: a grep, glob or listing; command: a shell command; wrote: a file changed; web: a fetch or search; tool: anything else. */
-  kind: z.enum(["read", "search", "command", "wrote", "web", "tool"]),
+  /**
+   * read: a file opened; search: a grep, glob or listing; command: a shell
+   * command; wrote: a file changed; web: a fetch or search; tool: anything
+   * else; ledger: a run the room thread recorded in its ledger, which the
+   * view rests on.
+   */
+  kind: z.enum(["read", "search", "command", "wrote", "web", "tool", "ledger"]),
   /** The path, query or command, shortened for display; paths inside the folder are relative to it. */
   what: z.string().max(400),
   /** True when the thread wrote outside its own storage: the folder was meant to be read only. */
   outside: z.boolean().optional(),
   failed: z.boolean().optional(),
+  /** A ledger entry whose command the room thread's own events do not show it running. */
+  unconfirmed: z.boolean().optional(),
 });
 export type BuiltFrom = z.infer<typeof builtFromSchema>;
 
@@ -38,20 +45,30 @@ export const parentRefSchema = z.object({
 });
 export type ParentRef = z.infer<typeof parentRefSchema>;
 
-/** line: a said line; more: variations of one view; cross: two views crossed; zoom: a child room's first round. */
-export const roundKindSchema = z.enum(["line", "more", "cross", "zoom"]);
+/**
+ * line: a said line; more: variations of one view; cross: two views
+ * crossed; zoom: a child room's first round; work: pages the room thread
+ * put on the table.
+ */
+export const roundKindSchema = z.enum(["line", "more", "cross", "zoom", "work"]);
 export type RoundKind = z.infer<typeof roundKindSchema>;
+
+/** Where a line goes: look (four views), work (the room thread), or both. */
+export const routeSchema = z.enum(["look", "work", "both"]);
+export type Route = z.infer<typeof routeSchema>;
 
 export const lineSchema = z.object({
   id,
   at: z.number(),
-  /** said: the person's line; did: what egg did; trouble: something that went wrong, in plain words. */
-  kind: z.enum(["said", "did", "trouble"]),
+  /** said: the person's line; did: what egg did; trouble: something that went wrong, in plain words; note: a line from the room thread. */
+  kind: z.enum(["said", "did", "trouble", "note"]),
   text: z.string().max(4000),
   /** How a said line came in. */
   /** key: started by a key (m, x) rather than words. */
   source: z.enum(["typed", "voice", "pasted", "key"]).optional(),
   roundId: id.optional(),
+  /** For a said line: where it went. look: four views; work: the room thread; both. */
+  route: routeSchema.optional(),
 });
 export type Line = z.infer<typeof lineSchema>;
 
@@ -80,6 +97,10 @@ export const viewSchema = z.object({
   /** Where the kept file was written, when kept. */
   keptPath: z.string().nullable(),
   archived: z.boolean(),
+  /** The ledger entries (ids) the view says it rests on, those that exist. */
+  ledger: z.array(z.string().max(60)).max(100).optional(),
+  /** For a page the room thread made: its file in .egg/views/. */
+  file: z.string().max(200).optional(),
 });
 export type View = z.infer<typeof viewSchema>;
 
@@ -99,6 +120,46 @@ export const roundSchema = z.object({
   viewIds: z.array(id),
 });
 export type Round = z.infer<typeof roundSchema>;
+
+/** One run the room thread recorded, as kept with the room. */
+export const ledgerRecordSchema = z.object({
+  id: z.string().max(60),
+  at: z.string().max(40),
+  for: z.string().max(300),
+  command: z.string().max(1000),
+  output: z.string().max(400),
+  exit: z.number().int().nullable(),
+});
+export type LedgerRecord = z.infer<typeof ledgerRecordSchema>;
+
+export const workspaceKindSchema = z.enum(["clone", "worktree", "in-place"]);
+
+/** The room's long-lived working thread. */
+export const workerSchema = z.object({
+  threadId: id,
+  environmentId: z.string().max(100).nullable(),
+  kind: workspaceKindSchema,
+  /** The workspace's path once bb has made it; empty before. */
+  workspace: z.string().max(2000),
+  startedAt: z.number(),
+  /** It has answered its standing instructions and any saved material is back. */
+  ready: z.boolean(),
+  /** Work lines said before it was ready, sent once it is. */
+  pending: z.array(z.object({ text: z.string().max(4000), lineId: id, alsoLooking: z.boolean() })).max(50),
+  /** How many lines of notes.jsonl have become notebook lines. */
+  notesSeen: z.number().int().min(0),
+  /** Each page in views/ seen so far, with the version (size:mtime) put on the table. */
+  viewsSeen: z.record(z.string(), z.string()),
+  /** Files over the size limit already said in a note, with the size that was said. */
+  skippedSeen: z.record(z.string(), z.number()),
+  /** Work lines sent to it since it started. */
+  sent: z.number().int().min(0),
+  /** Its workspace is gone (environment destroyed or thread archived): the next work line starts a fresh one. */
+  gone: z.boolean(),
+  /** When material was last copied out. */
+  syncedAt: z.number().nullable(),
+});
+export type Worker = z.infer<typeof workerSchema>;
 
 export const roomSchema = z.object({
   id,
@@ -122,6 +183,10 @@ export const roomSchema = z.object({
     .optional(),
   /** The view pinned as context for the next lines, if any. */
   pin: parentRefSchema.nullable().optional(),
+  /** The room thread, once a line has been routed to work. */
+  worker: workerSchema.nullable().optional(),
+  /** Earlier room threads whose workspace went away, oldest first. */
+  pastWorkers: z.array(id).max(50).optional(),
 });
 export type Room = z.infer<typeof roomSchema>;
 

@@ -1,7 +1,8 @@
 // A round: the planning step that picks four different angles for a line,
 // and the prompt each view thread gets. Pure functions; the server wires
 // them to threads.
-import { ANGLES_PER_ROUND, type Room, type RoundKind, roundViews } from "./model.ts";
+import { ANGLES_PER_ROUND, type Room, type Route, type RoundKind, roundViews } from "./model.ts";
+import { materialForViews } from "./worker.ts";
 
 export interface Angle {
   name: string;
@@ -32,6 +33,11 @@ export interface RoundSpec {
   pinned?: Reference | null;
   /** A token the reference delimiters carry, so quoted text cannot close them. */
   nonce: string;
+  /**
+   * Set once the room has a room thread: the workspace view threads read
+   * (its copy of the folder, with .egg/ in it), and what its ledger holds.
+   */
+  material?: { workspace: string; runs: readonly string[] } | null;
 }
 
 export const PLAIN_SPEC: RoundSpec = { kind: "line", refs: [], pinned: null, nonce: "plain" };
@@ -162,12 +168,44 @@ export function plannerPrompt(room: Room, line: string, spec: RoundSpec = PLAIN_
     `The person just said: ${JSON.stringify(line)}`,
     "",
     ...(refs.length ? ["Use the reference only to see what the person was looking at. The angles are about the real folder, not about the reference."] : []),
+    ...materialLines(spec),
     `Pick ${ANGLES_PER_ROUND} DIFFERENT angles from which a small one-page view of the real folder would show the person something about what they just said.`,
     "Spread them out: different kinds of looking (for example a map, a single concrete trace, numbers, a timeline, a comparison, what is odd), not four takes on one idea.",
     "Lean towards angles like the kept ones and away from the dropped ones.",
     "Each name is 1 to 4 plain words. Each focus is one short sentence saying what the view shows.",
-    `Reply with JSON only, no prose, no code fence: [{"name":"...","focus":"..."}, ...] with exactly ${ANGLES_PER_ROUND} items.`,
+    ...(spec.kind === "line"
+      ? [
+          ROUTE_RULE,
+          `Reply with JSON only, no prose, no code fence: {"route":"look","angles":[{"name":"...","focus":"..."}, ...]} with exactly ${ANGLES_PER_ROUND} angles (give the angles even when the route is work).`,
+        ]
+      : [`Reply with JSON only, no prose, no code fence: [{"name":"...","focus":"..."}, ...] with exactly ${ANGLES_PER_ROUND} items.`]),
   ].join("\n");
+}
+
+/**
+ * Where a line goes, decided in the same planning call as its angles (no
+ * extra model call). Work is what cannot be had by reading.
+ */
+export const ROUTE_RULE = [
+  'Also pick the route for the line. "look": it can be answered by reading the folder; four views are made.',
+  '"work": it asks for something that cannot be had by reading: to run, build, verify, measure, try, test, benchmark or produce something. The room\'s working thread does it in a copy of the folder, for as long as it takes.',
+  '"both": it asks for work, and a quick look at the folder would also help right now.',
+  "When unsure between look and work, a line that says verify, run, build, measure, test or try is work.",
+].join(" ");
+
+/** The route in a planner's reply, or look when it gives none. */
+export function parseRoute(reply: string | null | undefined): Route {
+  const m = /"route"\s*:\s*"(look|work|both)"/i.exec(reply ?? "");
+  return m ? (m[1]!.toLowerCase() as Route) : "look";
+}
+
+function materialLines(spec: RoundSpec): string[] {
+  if (!spec.material) return [];
+  const runs = spec.material.runs.slice(-10);
+  return [
+    `This room has a working thread that builds and runs things in a copy of the folder; its ledger has ${spec.material.runs.length} run${spec.material.runs.length === 1 ? "" : "s"}${runs.length ? `, the latest: ${runs.map((r) => JSON.stringify(r)).join("; ")}` : ""}.`,
+    "Views read its real results, so angles that look at those results are welcome.",
+  ];
 }
 
 /** Variations of one view: four named axes. */
@@ -294,12 +332,17 @@ export function viewPrompt(room: Room, line: string, angle: Angle, spec: RoundSp
     ...(refs.length
       ? ["The reference only shows what the person was looking at. Build your view from the folder itself: read the real files again, and never copy a fact or number from the reference without checking it in the folder."]
       : []),
-    `The folder to look at: ${room.folder}. It is READ ONLY: never create, change or delete anything in it.`,
+    ...(spec.material
+      ? [
+          `The folder to look at: ${spec.material.workspace}, the room thread's copy of ${room.folder}. It is READ ONLY for you: never create, change or delete anything in it.`,
+          ...materialForViews(spec.material.workspace),
+        ]
+      : [`The folder to look at: ${room.folder}. It is READ ONLY: never create, change or delete anything in it.`]),
     VIEW_READING,
     "Make ONE view of the real thing from your angle, built only from what you actually read or ran. Name real files and real numbers; never invent.",
     VIEW_FORM,
     "or plain text when that suits the angle better.",
-    'Save it as "$BB_THREAD_STORAGE/view.html" or "$BB_THREAD_STORAGE/view.txt" (expand the variable in a shell). Write nothing else anywhere.',
+    `Save it as "$BB_THREAD_STORAGE/view.html" or "$BB_THREAD_STORAGE/view.txt" (expand the variable in a shell). Write nothing else anywhere${spec.material ? " but view.json beside it" : ""}.`,
     VIEW_WRITE_ONCE,
   ].join("\n");
 }

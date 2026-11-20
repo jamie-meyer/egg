@@ -8,7 +8,8 @@ import { z } from "zod";
 import { type EngineSettings, type PermissionMode, createEngine } from "./src/engine.ts";
 import { DEFAULT_ROOMS_DIR, DEFAULT_TITLE_PREFIX } from "./src/identity.ts";
 import { expandHome } from "./src/kept.ts";
-import { roomSchema, roomSummarySchema, summarize } from "./src/model.ts";
+import { roomSchema, roomSummarySchema, summarize, workspaceKindSchema } from "./src/model.ts";
+import { workspaceSetting } from "./src/workspace.ts";
 import { createStore } from "./src/store.ts";
 
 const id = z.string().min(1).max(100);
@@ -37,8 +38,30 @@ export const rpcContract = defineRpcContract({
     output: z.object({ room: roomSchema }),
   },
   room_get: { input: z.object({ roomId: id }), output: z.object({ room: roomSchema.nullable() }) },
-  /** A line from the person: starts a round. */
+  /** A line from the person: starts a round (the planning step routes it to views, the room thread, or both). */
   say: { input: z.object({ roomId: id, text: lineText, source }), output: z.object({ roundId: z.string() }) },
+  /** w: a line straight to the room thread, with no planning step. */
+  work: { input: z.object({ roomId: id, text: lineText, source }), output: z.object({ lineId: z.string() }) },
+  /** The room thread's status line, read from bb now; null when the room has none. */
+  worker_status: {
+    input: z.object({ roomId: id }),
+    output: z
+      .object({
+        threadId: z.string(),
+        state: z.enum(["starting", "running", "waiting on you", "failed", "idle", "gone"]),
+        since: z.number(),
+        step: z.string(),
+        quietMs: z.number().nullable(),
+        tokens: z.number().nullable(),
+        workspace: z.string(),
+        kind: workspaceKindSchema,
+        ready: z.boolean(),
+        ledger: z.number(),
+      })
+      .nullable(),
+  },
+  /** S then y: stop the room thread's turn. */
+  worker_stop: { input: z.object({ roomId: id }), output: z.object({ stopped: z.boolean() }) },
   /** m: four variations of a view along different axes. */
   more: { input: z.object({ roomId: id, viewId: id }), output: z.object({ roundId: z.string() }) },
   /** x: cross two views (A first). */
@@ -65,6 +88,8 @@ export const rpcContract = defineRpcContract({
 });
 
 export const ROOM_CHANGED = "room-changed";
+/** How often the room thread's material is synced while it works. */
+const SYNC_EVERY_MS = 20_000;
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -82,8 +107,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     providerId: {
       type: "string",
-      label: "Agent provider",
-      description: "The bb provider the planning and view threads run on.",
+      label: "Agent provider for views",
+      description: "The bb provider the view threads run on (and the planning step and room thread, unless set below).",
       default: "claude-code",
     },
     permissionMode: {
@@ -92,6 +117,58 @@ export default async function plugin(bb: BbPluginApi) {
       description: "auto keeps bb's workspace sandbox; full bypasses it. Views are told to read only either way.",
       options: ["auto", "accept-edits", "full"],
       default: "auto",
+    },
+    plannerProviderId: {
+      type: "string",
+      label: "Agent provider for the planning step",
+      description: "Empty: the same as for views.",
+      default: "",
+    },
+    plannerPermissionMode: {
+      type: "select",
+      label: "Permission mode for the planning step",
+      description: "The planning step is told to use no tools.",
+      options: ["auto", "accept-edits", "full"],
+      default: "auto",
+    },
+    roomThreadModel: {
+      type: "string",
+      label: "Model for the room thread",
+      description: "The room thread builds and runs things for as long as it takes. Empty: the provider's default. Set it to the best model available to you.",
+      default: "",
+    },
+    roomThreadProviderId: {
+      type: "string",
+      label: "Agent provider for the room thread",
+      description: "Empty: the same as for views.",
+      default: "",
+    },
+    roomThreadPermissionMode: {
+      type: "select",
+      label: "Permission mode for the room thread",
+      description: "auto keeps bb's workspace sandbox (the room thread may write in its own workspace); full bypasses it.",
+      options: ["auto", "accept-edits", "full"],
+      default: "auto",
+    },
+    workspace: {
+      type: "select",
+      label: "Where the room thread works",
+      description: "auto: a copy-on-write clone if available, else a git worktree, else it says so and stops. in-place: the folder itself.",
+      options: ["auto", "clone", "worktree", "in-place"],
+      experimental_optionLabels: { auto: "auto (clone, then worktree)", clone: "copy-on-write clone", worktree: "git worktree", "in-place": "the folder itself (in place)" },
+      default: "auto",
+    },
+    cloneProviderId: {
+      type: "string",
+      label: "Copy-on-write environment provider",
+      description: "The bb environment provider that makes clones, offered by another plugin when it is installed.",
+      default: "cow-clone",
+    },
+    materialMaxMb: {
+      type: "number",
+      label: "Largest material file copied out (MB)",
+      description: "Each sync copies the room thread's .egg/ folder to the room's directory; files larger than this are skipped and said in a note.",
+      default: 20,
     },
     roomsDir: {
       type: "string",
@@ -123,11 +200,20 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function engineSettings(): Promise<EngineSettings> {
     const s = await settings.get();
+    const mode = (value: string) => (["auto", "accept-edits", "full"].includes(value) ? value : "auto") as PermissionMode;
+    const providerId = s.providerId.trim() || "claude-code";
+    const mb = Number(s.materialMaxMb);
     return {
       viewModel: s.viewModel.trim() || "claude-sonnet-5-5",
       plannerModel: s.plannerModel.trim() || "claude-haiku-5-5",
-      providerId: s.providerId.trim() || "claude-code",
-      permissionMode: (["auto", "accept-edits", "full"].includes(s.permissionMode) ? s.permissionMode : "auto") as PermissionMode,
+      providerId,
+      permissionMode: mode(s.permissionMode),
+      plannerProviderId: s.plannerProviderId.trim() || providerId,
+      plannerPermissionMode: mode(s.plannerPermissionMode),
+      roomThread: { providerId: s.roomThreadProviderId.trim() || providerId, model: s.roomThreadModel.trim(), permissionMode: mode(s.roomThreadPermissionMode) },
+      workspace: workspaceSetting(s.workspace),
+      cloneProviderId: s.cloneProviderId.trim() || "cow-clone",
+      materialMaxBytes: Math.round((Number.isFinite(mb) && mb > 0 ? mb : 20) * 1_000_000),
       roomsDir: s.roomsDir.trim() || DEFAULT_ROOMS_DIR,
       titlePrefix: s.threadTitlePrefix.trim() || DEFAULT_TITLE_PREFIX,
     };
@@ -268,6 +354,9 @@ export default async function plugin(bb: BbPluginApi) {
       return { room };
     },
     say: async ({ roomId, text, source: from }) => ({ roundId: await engine.say(roomId, text, from) }),
+    work: async ({ roomId, text, source: from }) => ({ lineId: await engine.work(roomId, text, from) }),
+    worker_status: async ({ roomId }) => engine.roomThread.status(roomId),
+    worker_stop: async ({ roomId }) => ({ stopped: await engine.roomThread.stop(roomId) }),
     more: async ({ roomId, viewId }) => ({ roundId: await engine.more(roomId, viewId) }),
     cross: async ({ roomId, a, b }) => ({ roundId: await engine.cross(roomId, a, b) }),
     zoom: async ({ roomId, viewId, part, source: from }) => ({ room: (await engine.zoom(roomId, viewId, part, from)).room }),
@@ -293,5 +382,19 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     if (ours(thread as { originPluginId?: string | null })) void engine.onThreadSettled(thread.id, error ?? "the thread failed");
+  });
+
+  // The slow timer: while a room thread works, its notes, pages and ledger
+  // are synced into the room and its material copied out.
+  bb.background.service("room-thread-sync", {
+    async start(signal) {
+      while (!signal.aborted) {
+        await engine.roomThread.tick().catch((e) => bb.log.warn(`room thread sync: ${e instanceof Error ? e.message : String(e)}`));
+        await new Promise<void>((done) => {
+          const t = setTimeout(done, SYNC_EVERY_MS);
+          signal.addEventListener("abort", () => (clearTimeout(t), done()), { once: true });
+        });
+      }
+    },
   });
 }
