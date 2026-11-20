@@ -286,8 +286,10 @@ async function runsOutliveTheTurn(page, roomId) {
   check(wrongs.length === 0, `egg's ledger matched the records and processes at each of ${looks} looks${wrongs.length ? `: ${wrongs.join("; ")}` : ""}`);
   await waitWatching(page, `[...document.querySelectorAll('[data-egg-line] .egg-line-text')].some((l) => l.textContent.startsWith('Woke the room thread: ${long.id} finished, exit 0'))`, 90_000, "egg wakes the thread");
   check(true, `egg wakes the idle thread when ${long.id} finishes`);
-  await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 90_000, "the thread comes back");
-  check(true, "the thread comes back to it");
+  // A woken turn can be short: it came back if a turn ran after the wake (running now, or idle since after it).
+  const wokeAt = (await rpc("room_get", { roomId })).room.lines.filter((l) => l.text.startsWith(`Woke the room thread: ${long.id}`)).at(-1).at;
+  const back = await waitFor(() => rpc("worker_status", { roomId }), (w) => w?.state === "running" || (w?.state === "idle" && w.since > wokeAt), 90_000, 2000);
+  check(back?.state === "running" || back?.since > wokeAt, `the thread comes back to it (${back?.state}, ${Math.round(((back?.since ?? 0) - wokeAt) / 1000)} s after the wake)`);
   await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 10 * 60_000, "and settles");
 }
 
