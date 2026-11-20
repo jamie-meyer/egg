@@ -185,6 +185,9 @@ and not to copy a fact from the reference without checking it.
 
 ## Keys
 
+From anywhere in bb, Control+Option+E opens egg's page (the command
+"egg: open its page"; rebind it in bb's keyboard settings).
+
 Press `?` on the page for this legend.
 
 | Key | Does |

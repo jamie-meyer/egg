@@ -12,7 +12,7 @@
     "name": "egg",
     "description": "🥚 An ideation room: say a half-formed thought about a folder and compare a few views of the real thing side by side.",
     "branding": {
-      "icon": "Egg"
+      "icon": "./assets/egg.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

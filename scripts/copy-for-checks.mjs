@@ -78,8 +78,10 @@ writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 const identityPath = join(target, "src", "identity.ts");
 const identity = readFileSync(identityPath, "utf8")
   .replace(/export const DEFAULT_ROOMS_DIR = ".*";/, `export const DEFAULT_ROOMS_DIR = ${JSON.stringify(rooms)};`)
-  .replace(/export const DEFAULT_TITLE_PREFIX = ".*";/, `export const DEFAULT_TITLE_PREFIX = ${JSON.stringify(prefix)};`);
-if (!identity.includes(JSON.stringify(rooms)) || !identity.includes(JSON.stringify(prefix))) {
+  .replace(/export const DEFAULT_TITLE_PREFIX = ".*";/, `export const DEFAULT_TITLE_PREFIX = ${JSON.stringify(prefix)};`)
+  // Another default shortcut than the installed egg's, or bb binds neither.
+  .replace(/export const DEFAULT_OPEN_KEY = ".*";/, 'export const DEFAULT_OPEN_KEY = "9";');
+if (!identity.includes(JSON.stringify(rooms)) || !identity.includes(JSON.stringify(prefix)) || !identity.includes('DEFAULT_OPEN_KEY = "9"')) {
   console.error("Could not rewrite src/identity.ts in the copy.");
   process.exit(1);
 }

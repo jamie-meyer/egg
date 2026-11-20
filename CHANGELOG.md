@@ -2,6 +2,10 @@
 
 ## 0.2.0
 
+- **Open egg from anywhere.** Control+Option+E opens egg's page from any
+  screen in bb, and "egg: open its page" is in bb's command palette. The
+  shortcut can be rebound in bb's keyboard settings.
+- **Its own icon:** a hatching egg.
 - **A room thread.** A room can have one long-lived thread that does real
   work: builds, writes scripts and harnesses, runs them for minutes or
   hours. It starts the first time a line asks for work and stays for the
