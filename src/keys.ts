@@ -26,7 +26,15 @@ export type Command =
   | { kind: "zoom" }
   | { kind: "up" }
   | { kind: "pin" }
-  | { kind: "delete-room" };
+  | { kind: "delete-room" }
+  /** w: the line input, straight to the room thread. */
+  | { kind: "work-input" }
+  /** t: open or close the room thread's chat beside the table. */
+  | { kind: "chat" }
+  /** S: stop the room thread's turn (y confirms). */
+  | { kind: "stop" }
+  /** Escape on the table: closes the chat pane when it is open. */
+  | { kind: "escape" };
 
 export interface KeyLike {
   key: string;
@@ -36,7 +44,7 @@ export interface KeyLike {
 }
 
 /** What a key press asks for in a mode, or null when the page leaves it alone. */
-export function commandFor(event: KeyLike, mode: Mode): Command | null {
+export function commandFor(event: KeyLike, mode: Mode, context: { chatOpen?: boolean } = {}): Command | null {
   if (event.ctrlKey || event.metaKey || event.altKey) return null;
   const k = event.key;
   if (mode === "legend") return k === "Escape" || k === "?" || k === "q" ? { kind: "close" } : null;
@@ -92,7 +100,8 @@ export function commandFor(event: KeyLike, mode: Mode): Command | null {
     case "Enter":
       return mode === "table" ? { kind: "open" } : null;
     case "Escape":
-      return mode === "large" ? { kind: "close" } : null;
+      // On the table Escape is bb's, except to close the room thread's chat.
+      return mode === "large" ? { kind: "close" } : mode === "table" && context.chatOpen ? { kind: "escape" } : null;
     case "y":
       return { kind: "keep" };
     case "d":
@@ -130,9 +139,24 @@ export function commandFor(event: KeyLike, mode: Mode): Command | null {
       return { kind: "up" };
     case "p":
       return { kind: "pin" };
+    case "w":
+      return { kind: "work-input" };
+    case "t":
+      return { kind: "chat" };
+    case "S":
+      return { kind: "stop" };
     default:
       return null;
   }
+}
+
+/**
+ * After S, the next key decides: y stops the room thread's turn, any other
+ * key (Escape included) leaves it running.
+ */
+export function confirmStop(event: KeyLike): "stop" | "cancel" | "ignore" {
+  if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)) return "ignore";
+  return event.key === "y" && !event.ctrlKey && !event.metaKey && !event.altKey ? "stop" : "cancel";
 }
 
 /**
@@ -266,6 +290,16 @@ export const LEGEND: readonly { title: string; keys: readonly [string, string][]
       ["i", "open the line input (a also); Enter sends, Escape leaves"],
       ["paste", "anywhere on the page opens the line input with the text in it"],
       ["hold Space", "record while held, transcribe on release (clips under 1 s are ignored; key or off in settings)"],
+      ["w", "a line straight to the room thread: it does the work, no planning step"],
+    ],
+  },
+  {
+    title: "The room thread",
+    keys: [
+      ["t", "open or close its chat beside the table (bb's questions and permission requests are answered there)"],
+      ["i", "with the chat open: type in the chat"],
+      ["Esc", "close the chat"],
+      ["S", "stop its turn; y confirms, any other key leaves it running"],
     ],
   },
   {

@@ -133,3 +133,20 @@ test("every key in the legend is one the page answers", () => {
   const all = LEGEND.flatMap((g) => g.keys.map(([k]) => k));
   for (const k of ["m", "v", "c", "x", "z", "-", "p", "D"]) assert.ok(all.includes(k), `${k} in the legend`);
 });
+
+test("room thread keys: w, t, S; Escape on the table only while its chat is open; y confirms a stop", async () => {
+  const { commandFor, confirmStop, LEGEND } = await import("../src/keys.ts");
+  assert.deepEqual(commandFor({ key: "w" }, "table"), { kind: "work-input" });
+  assert.deepEqual(commandFor({ key: "t" }, "table"), { kind: "chat" });
+  assert.deepEqual(commandFor({ key: "S" }, "table"), { kind: "stop" });
+  assert.equal(commandFor({ key: "Escape" }, "table"), null);
+  assert.deepEqual(commandFor({ key: "Escape" }, "table", { chatOpen: true }), { kind: "escape" });
+  assert.deepEqual(commandFor({ key: "Escape" }, "large", { chatOpen: true }), { kind: "close" });
+  assert.equal(confirmStop({ key: "y" }), "stop");
+  assert.equal(confirmStop({ key: "n" }), "cancel");
+  assert.equal(confirmStop({ key: "Escape" }), "cancel");
+  assert.equal(confirmStop({ key: "y", metaKey: true }), "cancel");
+  assert.equal(confirmStop({ key: "Shift" }), "ignore");
+  const keys = LEGEND.flatMap((g) => g.keys.map(([k]) => k));
+  for (const k of ["w", "t", "S", "i", "y", "d", "m", "x", "z", "p", "r", "n"]) assert.ok(keys.some((x) => x.split(" ").includes(k)), k);
+});

@@ -15,6 +15,10 @@
 //   pin      pin a view (p) and say a line with it pinned                    5
 //   up       back up to the parent room (-), at the view zoomed from         0
 //   rooms    the indented room list; delete the test rooms (D, u once)       0
+//   work     a room whose first line asks for work: the room thread runs     ~9
+//            it in a clone; notes, a page citing the ledger, a look line
+//            whose views cite it, the status line, stop, the chat pane,
+//            material on disk, and the folder untouched. Long: up to 40 min.
 //
 // All of it is 23 threads. To check one change with a handful, run a subset
 // with --only, and reuse a room that already has a finished round with
@@ -35,10 +39,12 @@
 // --plugin is the plugin id egg is installed under (for a test copy
 // installed beside the real one, for example). Needs Chrome; run it outside
 // any command sandbox.
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { firstPage, launchChrome, sleep } from "./cdp.mjs";
 
-const SECTIONS = ["new", "large", "keep", "timing", "more", "compare", "cross", "zoom", "pin", "up", "rooms"];
+const SECTIONS = ["new", "large", "keep", "timing", "more", "compare", "cross", "zoom", "pin", "up", "rooms", "work"];
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -128,6 +134,7 @@ async function collectThreads(roomId) {
   try {
     const { room } = await rpc("room_get", { roomId });
     for (const v of Object.values(room?.views ?? {})) if (v.threadId) viewThreads.add(v.threadId);
+    for (const t of [room?.worker?.threadId, ...(room?.pastWorkers ?? [])]) if (t) viewThreads.add(t);
   } catch (e) {
     console.log(`(could not list threads of ${roomId}: ${e.message})`);
   }
@@ -156,6 +163,35 @@ async function markTwo(page) {
   await page.key("l");
   ctx.markB = await selectedId(page);
   await page.key("v");
+}
+
+const workerState = (page) => page.eval("document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState ?? null");
+const workerLine = (page) => page.eval("document.querySelector('[data-egg-worker-line]')?.textContent ?? ''");
+const gitState = (dir) => {
+  try {
+    return execFileSync("git", ["-C", dir, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" });
+  } catch (e) {
+    return `(not git: ${e.message})`;
+  }
+};
+/** Every state the status line showed, in order, with when. */
+const seenStates = [];
+async function watchState(page) {
+  const state = await workerState(page);
+  if (state && seenStates.at(-1)?.state !== state) {
+    seenStates.push({ state, at: new Date().toISOString(), line: await workerLine(page) });
+    console.log(`   status line: ${seenStates.at(-1).line}`);
+  }
+  return state;
+}
+async function waitWatching(page, expr, timeout, label) {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) {
+    await watchState(page);
+    if (await page.eval(expr)) return true;
+    await sleep(3000);
+  }
+  throw new Error(`timed out: ${label}`);
 }
 
 const steps = {
@@ -358,6 +394,102 @@ const steps = {
     await page.waitFor(subjectIs(ctx.subject), { label: "the parent room" });
     await sleep(800);
     check((await selectedId(page)) === ctx.zoomFrom && (await roundNumber(page)) === ctx.zoomRound, "- goes up to the parent room, on the view it was zoomed from");
+  },
+
+  // ---- The room thread: a line that asks for work, end to end.
+  async work(page) {
+    const workLine = "run the unit tests five times and show me which tests are slowest and how much they vary";
+    const gitBefore = gitState(folder);
+    check(!existsSync(join(folder, ".egg")), `the folder has no .egg/ before (${folder})`);
+    await focusRoot(page);
+    await page.key("n");
+    await page.waitFor("!!document.querySelector('[data-egg-folder]')", { label: "the new-room form" });
+    await page.eval(`(() => { const el = document.querySelector('[data-egg-folder]'); el.focus(); el.select(); })()`);
+    await page.type(folder);
+    await page.eval("document.querySelector('[data-egg-first-line]').focus()");
+    await page.type(workLine);
+    await page.key("Enter");
+    await page.waitFor(subjectIs(workLine), { label: "the work room opens" });
+    const roomId = await page.eval(`localStorage.getItem("egg:last-room")`);
+    roomIds.push(roomId);
+    ctx.workRoomId = roomId;
+    await page.waitFor("[...document.querySelectorAll('[data-egg-line] .egg-line-text')].some((l) => /^To the room thread/.test(l.textContent))", { timeout: 60000, label: "routed to the room thread" });
+    check(true, "the planning step routes the line to the room thread, and the notebook says so");
+    await page.waitFor("!!document.querySelector('[data-egg-worker]')", { timeout: 60000, label: "the status line" });
+    check(true, "the room thread's status line is on the page");
+    await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 5 * 60_000, "the room thread running");
+    const room1 = (await rpc("room_get", { roomId })).room;
+    check(room1.worker?.kind === "clone" && room1.worker.workspace.includes("/clones/"), `it works in a clone (${room1.worker?.workspace})`);
+    check((await count(page, "[data-egg-cards] [data-egg-card]")) === 0, "no four views for a work line");
+    await shot(page, "w1-running");
+    // A note, then a page of its own, then idle.
+    await waitWatching(page, "document.querySelectorAll('[data-egg-line=note]').length > 0", 20 * 60_000, "a note from the room thread");
+    check(true, `a note from the room thread lands in the notebook (${(await page.eval("document.querySelector('[data-egg-line=note]').textContent"))})`);
+    await waitWatching(page, "!!document.querySelector('[data-egg-work-round]') && document.querySelectorAll('[data-egg-cards] [data-egg-card]').length > 0", 30 * 60_000, "a page from the room thread");
+    await page.key("b");
+    await sleep(500);
+    const pageView = (await rpc("room_get", { roomId })).room;
+    const workRound = pageView.rounds.filter((r) => r.kind === "work").at(-1);
+    const made = workRound.viewIds.map((id) => pageView.views[id]);
+    const ledgerBuilt = made.flatMap((v) => v.builtFrom.filter((b) => b.kind === "ledger"));
+    check(ledgerBuilt.length > 0, `a page the room thread made lands, and its "built from" names ledger entries (${ledgerBuilt.map((b) => b.what.split(" · ")[0]).join(", ")}${ledgerBuilt.some((b) => b.unconfirmed) ? "; some not confirmed by its events" : ""})`);
+    check(await page.eval("[...document.querySelectorAll('[data-egg-built-from] .egg-built-kind')].some((k) => k.textContent === 'ledger')"), "the page shows ledger entries in built from");
+    await shot(page, "w2-page");
+    await page.key("b");
+    await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 30 * 60_000, "the room thread idle");
+    check(seenStates.some((s) => s.state === "running") && seenStates.at(-1).state === "idle", `the status line showed running, then idle (${seenStates.map((s) => s.state).join(" → ")})`);
+    // A look line: its views run in the room thread's environment and cite the ledger.
+    await focusRoot(page);
+    await page.key("i");
+    await page.type("draw a map of where the slowest of those tests live in the source, and what they exercise");
+    const n = (await rpc("room_get", { roomId })).room.rounds.length + 1;
+    const t0 = Date.now();
+    await page.key("Enter");
+    await waitRound(page, n, 4, t0, "look round");
+    const look = (await rpc("room_get", { roomId })).room;
+    const lookViews = look.rounds.at(-1).viewIds.map((id) => look.views[id]);
+    const citing = lookViews.filter((v) => (v.ledger ?? []).length > 0 && v.builtFrom[0]?.kind === "ledger");
+    check(lookViews.every((v) => v.ledger !== undefined), "the look line's views ran in the room thread's environment");
+    check(citing.length >= 1, `views of a following look line cite the ledger above their own commands (${citing.length} of ${lookViews.length}: ${citing.map((v) => v.ledger.join("+")).join(", ")})`);
+    await shot(page, "w3-look");
+    // Stop: give it something long, then S, y.
+    await focusRoot(page);
+    await page.key("w");
+    await page.type("now run the whole test suite twenty more times in the background, one after another, recording each run in the ledger");
+    await page.key("Enter");
+    await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 5 * 60_000, "running again");
+    await sleep(20000);
+    await focusRoot(page);
+    await page.key("S");
+    await page.waitFor("!!document.querySelector('[data-egg-confirm-stop]')", { label: "the stop confirm" });
+    check(true, "S asks to confirm the stop");
+    await page.key("y");
+    await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState !== 'running' && [...document.querySelectorAll('[data-egg-line] .egg-line-text')].some((l) => /Stopped the room thread's turn/.test(l.textContent))", 3 * 60_000, "stopped");
+    check(["idle", "failed"].includes(await workerState(page)) && (await lines(page)).some((l) => /Stopped the room thread's turn/.test(l)), `y stops its turn (now ${await workerState(page)})`);
+    // The chat pane: opens beside the table without taking the keyboard; i types in it; Escape gives it back, then closes it.
+    await focusRoot(page);
+    await page.key("t");
+    await page.waitFor("!!document.querySelector('[data-egg-chat-pane]')", { label: "the chat pane" });
+    await sleep(3500);
+    const keptFocus = await page.eval("document.activeElement === document.querySelector('[data-egg-root]') || !document.querySelector('[data-egg-chat]').contains(document.activeElement)");
+    check(keptFocus, "t opens the room thread's chat in a pane, and the page keeps the keyboard");
+    await shot(page, "w4-chat");
+    await page.key("i");
+    await sleep(1500);
+    check(await page.eval("document.querySelector('[data-egg-chat]').contains(document.activeElement)"), "i with the chat open puts the keyboard in the chat");
+    await page.key("Escape");
+    await sleep(300);
+    await page.key("Escape");
+    await page.waitFor("!document.querySelector('[data-egg-chat-pane]')", { label: "the pane closes" });
+    check(true, "Escape gives the keyboard back, then closes the pane");
+    // Material on disk; the original folder untouched.
+    const final = (await rpc("room_get", { roomId })).room;
+    const material = join(final.dir, "material");
+    check(existsSync(join(material, "ledger.jsonl")) && existsSync(join(material, "notes.jsonl")), `material is on disk in the room's directory (${material})`);
+    check(!existsSync(join(folder, ".egg")), "the original folder has no .egg/");
+    check(gitState(folder) === gitBefore, "the original folder has no changes (git status as before)");
+    ctx.workMaterial = material;
+    console.log(JSON.stringify({ seenStates, workspace: final.worker?.workspace, roomThread: final.worker?.threadId, material }, null, 2));
   },
 
   // ---- The room list, and deleting the test rooms.

@@ -2,16 +2,20 @@
 // right, rooms and the legend over them. Everything is reachable from the
 // keyboard; see LEGEND in keys.ts.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
+import { ThreadChat, useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server.ts";
-import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, holdKeyCode, isEditable, liveMarks, moveOnTable, pasteAction, pickAt, selectionFor, tableRows, toggleMark } from "./keys.ts";
+import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, confirmStop, holdKeyCode, isEditable, liveMarks, moveOnTable, pasteAction, pickAt, selectionFor, tableRows, toggleMark } from "./keys.ts";
 import { type BuiltFrom, type Line, type ParentRef, type Room, type RoomSummary, type Round, type View, keptViews, roomTree, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
+import { type WorkerStatus, statusLine } from "./status.ts";
 import { type VoiceState, clipFile, createHoldToTalk, mediaRecorder } from "./voice.ts";
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
 type Content = { format: "html" | "text"; content: string };
+type WorkerInfo = WorkerStatus & { threadId: string; workspace: string; kind: "clone" | "worktree" | "in-place"; ready: boolean; ledger: number };
+/** bb's chat focuses its composer when it mounts; for this long, focus is handed back to the page. */
+const CHAT_SETTLE_MS = 2500;
 
 const LAST_ROOM = "egg:last-room";
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -100,6 +104,7 @@ function BuiltFromList({ entries, parents = [], roomId = null }: { entries: read
           <span className="egg-built-kind">{e.kind}</span>
           <code title={e.what}>{e.what}</code>
           {e.failed ? <span className="egg-trouble"> (failed)</span> : null}
+          {e.unconfirmed ? <span className="egg-trouble"> (not in the room thread's own events)</span> : null}
           {e.outside ? <span className="egg-trouble"> (outside its storage)</span> : null}
         </li>
       ))}
@@ -110,6 +115,13 @@ function BuiltFromList({ entries, parents = [], roomId = null }: { entries: read
 
 /** The card's line naming its parents: the axis of a variation, A × B of a cross. */
 function lineage(view: View): string | null {
+  const rests = view.ledger && view.ledger.length ? `rests on ${view.ledger.join(", ")}` : null;
+  if (view.file) return ["made by the room thread", rests].filter(Boolean).join(" · ");
+  const own = lineageOf(view);
+  return own && rests ? `${own} · ${rests}` : (own ?? rests);
+}
+
+function lineageOf(view: View): string | null {
   const parents = view.parents ?? [];
   const crossed = parents.filter((p) => p.role === "crossed");
   if (crossed.length === 2) return `${crossed.map((p) => `${p.label}: ${p.angle}`).join(" × ")}${view.axis ? ` · ${view.axis}` : ""}`;
@@ -126,6 +138,7 @@ function statusText(view: View, now: number): string {
   if (view.status === "waiting") return "starting…";
   if (view.status === "running") return `reading… ${view.startedAt ? Math.round((now - view.startedAt) / 1000) : 0} s`;
   if (view.status === "failed") return `failed: ${view.error ?? "unknown"}`;
+  if (view.file) return `the room thread's .egg/views/${view.file} · ${builtFromCount(view.builtFrom)}`;
   const took = view.startedAt && view.finishedAt ? `${Math.round((view.finishedAt - view.startedAt) / 1000)} s · ` : "";
   return `${took}${builtFromCount(view.builtFrom)}`;
 }
@@ -192,8 +205,8 @@ function Notebook({ lines, children }: { lines: readonly Line[]; children: React
       <ol className="egg-lines">
         {lines.map((line) => (
           <li key={line.id} className={`egg-line egg-line-${line.kind}`} data-egg-line={line.kind}>
-            <span className="egg-line-mark">{line.kind === "said" ? (line.source === "voice" ? "◉" : "›") : line.kind === "trouble" ? "!" : "·"}</span>
-            <span className="egg-line-text">{line.text}</span>
+            <span className="egg-line-mark">{line.kind === "said" ? (line.source === "voice" ? "◉" : line.route === "work" ? "⚒" : "›") : line.kind === "trouble" ? "!" : line.kind === "note" ? "◆" : "·"}</span>
+            <span className="egg-line-text" data-egg-route={line.route ?? undefined}>{line.text}</span>
           </li>
         ))}
       </ol>
@@ -325,6 +338,29 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
   );
 }
 
+/** The room thread's status line: always there once the room has one. */
+function WorkerBar({ info, now, chatOpen, confirming }: { info: WorkerInfo; now: number; chatOpen: boolean; confirming: boolean }) {
+  const where = info.kind === "in-place" ? "in the folder itself" : info.workspace ? `in a ${info.kind === "clone" ? "clone" : "worktree"}: ${info.workspace}` : `making its ${info.kind}…`;
+  return (
+    <div className={`egg-worker egg-worker-${info.state.replace(/\s+/g, "-")}`} data-egg-worker="" data-egg-worker-state={info.state} title={info.workspace}>
+      <span className="egg-worker-name">room thread</span>
+      <span className="egg-worker-status" data-egg-worker-line="">{statusLine(info, now)}</span>
+      <span className="egg-muted egg-small egg-path">
+        {info.ledger} run{info.ledger === 1 ? "" : "s"} in its ledger · {where}
+      </span>
+      <span className="egg-spacer" />
+      {confirming ? (
+        <span className="egg-trouble egg-small" data-egg-confirm-stop="">stop its turn? <kbd>y</kbd> stops, any other key leaves it running</span>
+      ) : (
+        <span className="egg-muted egg-small">
+          {info.state === "waiting on you" && !chatOpen ? <b className="egg-trouble">answer in its chat: </b> : null}
+          <kbd>t</kbd> {chatOpen ? "close chat" : "chat"} · <kbd>w</kbd> work · <kbd>S</kbd> stop
+        </span>
+      )}
+    </div>
+  );
+}
+
 function Legend() {
   return (
     <div className="egg-sheet egg-legend" data-egg-legend="">
@@ -363,7 +399,12 @@ export function EggPage() {
   const [roomId, setRoomId] = useState<string | null>(() => localStorage.getItem(LAST_ROOM));
   const [mode, setMode] = useState<Mode>("table");
   const [creating, setCreating] = useState<{ line: string } | null>(null);
-  const [input, setInput] = useState<{ text: string; key: number; source: "typed" | "pasted"; zoom?: { viewId: string; angle: string } } | null>(null);
+  const [input, setInput] = useState<{ text: string; key: number; source: "typed" | "pasted"; zoom?: { viewId: string; angle: string }; work?: boolean } | null>(null);
+  const [worker, setWorker] = useState<WorkerInfo | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const [confirming, setConfirming] = useState(false);
+  const chatMayFocus = useRef(false);
   const [marks, setMarks] = useState<string[]>([]);
   /** After going up (-): the view to land on once the parent room is open. */
   const land = useRef<string | null>(null);
@@ -435,6 +476,55 @@ export function EggPage() {
   useEffect(() => {
     setTheme(readTheme(rootRef.current));
     rootRef.current?.focus();
+  }, []);
+
+  // The room thread's status line, read from bb every few seconds while the room has one.
+  const workerThread = room?.worker?.threadId ?? null;
+  useEffect(() => {
+    if (!room?.id || !workerThread) {
+      setWorker(null);
+      setChatOpen(false);
+      return;
+    }
+    let live = true;
+    const read = () =>
+      rpc.call("worker_status", { roomId: room.id }).then(
+        (w) => live && setWorker(w),
+        () => undefined,
+      );
+    read();
+    const t = setInterval(read, 3000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [room?.id, workerThread, room?.updatedAt, rpc]);
+
+  const focusPage = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && rootRef.current?.contains(active)) active.blur();
+    rootRef.current?.focus({ preventScroll: true });
+  }, []);
+  // Opening the chat must not move the keyboard: bb's chat focuses its
+  // composer when it mounts, so focus is handed back until i asks for it.
+  useEffect(() => {
+    chatMayFocus.current = false;
+    if (!chatOpen) return;
+    const pane = rootRef.current?.querySelector<HTMLElement>("[data-egg-chat]");
+    if (!pane) return;
+    const guard = () => {
+      if (!chatMayFocus.current) focusPage();
+    };
+    pane.addEventListener("focusin", guard);
+    const t = setTimeout(() => pane.removeEventListener("focusin", guard), CHAT_SETTLE_MS);
+    return () => {
+      clearTimeout(t);
+      pane.removeEventListener("focusin", guard);
+    };
+  }, [chatOpen, workerThread, focusPage]);
+  const typeInChat = useCallback(() => {
+    chatMayFocus.current = true;
+    setFocusRequest((n) => n + 1);
   }, []);
 
   // What the table shows.
@@ -552,7 +642,7 @@ export function EggPage() {
 
   // Keys and paste. Only when focus is on this page (or nowhere), never in a text field.
   const tree = useMemo(() => roomTree(rooms), [rooms]);
-  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings, marks, tree };
+  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings, marks, tree, chatOpen, confirming, worker };
   const live = useRef(state);
   live.current = state;
   useEffect(() => {
@@ -562,14 +652,37 @@ export function EggPage() {
     };
     const onKeyDown = (e: KeyboardEvent) => {
       const s = live.current;
+      // Escape in the room thread's chat gives the keyboard back to the page.
+      const inChat = (document.activeElement as HTMLElement | null)?.closest?.("[data-egg-chat]");
+      if (inChat && e.key === "Escape" && ours()) {
+        e.preventDefault();
+        e.stopPropagation();
+        chatMayFocus.current = false;
+        rootRef.current?.focus({ preventScroll: true });
+        return;
+      }
       if (!ours() || isEditable(document.activeElement as HTMLElement | null) || s.creating || s.input) return;
+      if (s.confirming) {
+        const answer = confirmStop(e);
+        if (answer === "ignore") return;
+        e.preventDefault();
+        e.stopPropagation();
+        setConfirming(false);
+        if (answer === "stop" && s.room) {
+          rpc.call("worker_stop", { roomId: s.room.id }).then(
+            (r) => flash(r.stopped ? "Stopped the room thread's turn." : "There was nothing to stop."),
+            (err) => flash(`Could not stop: ${errText(err)}`),
+          );
+        } else flash("Left the room thread running.");
+        return;
+      }
       if (s.holdKey && e.code === s.holdKey && !e.ctrlKey && !e.metaKey && !e.altKey && s.mode !== "rooms" && s.mode !== "legend") {
         e.preventDefault();
         e.stopPropagation();
         if (!e.repeat) void talk.press();
         return;
       }
-      const command = commandFor(e, s.mode);
+      const command = commandFor(e, s.mode, { chatOpen: s.chatOpen });
       if (!command) return;
       e.preventDefault();
       e.stopPropagation();
@@ -680,7 +793,31 @@ export function EggPage() {
         return;
       case "input":
         if (!s.room) setCreating({ line: "" });
+        else if (s.chatOpen) typeInChat();
         else setInput({ text: "", key: Date.now(), source: "typed" });
+        return;
+      case "work-input":
+        if (!s.room) setCreating({ line: "" });
+        else {
+          setMode("table");
+          setInput({ text: "", key: Date.now(), source: "typed", work: true });
+        }
+        return;
+      case "chat":
+        if (!s.room?.worker) return flash("This room has no room thread yet: w sends a line to one.");
+        setChatOpen((o) => !o);
+        if (s.chatOpen) focusPage();
+        return;
+      case "escape":
+        if (s.chatOpen) {
+          setChatOpen(false);
+          focusPage();
+        }
+        return;
+      case "stop":
+        if (!s.room?.worker || !s.worker) return flash("This room has no room thread.");
+        if (s.worker.state !== "running" && s.worker.state !== "waiting on you" && s.worker.state !== "starting") return flash(`The room thread is ${s.worker.state}: nothing to stop.`);
+        setConfirming(true);
         return;
       case "rooms": {
         loadRooms();
@@ -829,13 +966,15 @@ export function EggPage() {
         </span>
       </header>
 
-      <div className="egg-main">
+      {room && worker ? <WorkerBar info={worker} now={Date.now()} chatOpen={chatOpen} confirming={confirming} /> : null}
+      <div className={chatOpen && worker ? "egg-main egg-with-chat" : "egg-main"}>
         <Notebook lines={room?.lines ?? []}>
           {input && room ? (
             <LineInput
               key={input.key}
               initial={input.text}
               {...(input.zoom ? { placeholder: `zoom into… which part of "${input.zoom.angle}"? Enter makes a child room, Escape leaves`, mark: "⌕" } : {})}
+              {...(input.work ? { placeholder: "straight to the room thread: what should it do? Enter sends, Escape leaves", mark: "⚒" } : {})}
               onSend={(text) => {
                 setInput(null);
                 refocus();
@@ -849,6 +988,8 @@ export function EggPage() {
                     },
                     (e) => flash(`Could not zoom: ${errText(e)}`),
                   );
+                } else if (input.work) {
+                  rpc.call("work", { roomId: room.id, text, source: input.source }).catch((e) => flash(`Could not send: ${errText(e)}`));
                 } else void send(text, input.source);
               }}
               onLeave={() => {
@@ -858,7 +999,7 @@ export function EggPage() {
             />
           ) : room ? (
             <p className="egg-muted egg-small egg-prompt-hint">
-              <kbd>i</kbd> or paste a line{holdKey ? <> · hold <kbd>{holdKey === "Space" ? "Space" : "`"}</kbd> to talk</> : null}
+              <kbd>i</kbd> or paste a line{holdKey ? <> · hold <kbd>{holdKey === "Space" ? "Space" : "`"}</kbd> to talk</> : null} · <kbd>w</kbd> straight to the room thread
             </p>
           ) : null}
         </Notebook>
@@ -872,6 +1013,7 @@ export function EggPage() {
                 </span>
                 <span className="egg-round-line">{round.line}</span>
                 {round.status === "planning" ? <span className="egg-muted egg-small">picking four angles…</span> : null}
+                {round.kind === "work" ? <span className="egg-muted egg-small" data-egg-work-round="">pages from the room thread</span> : null}
                 {dropped ? <span className="egg-muted egg-small">{dropped} dropped</span> : null}
               </div>
               <div className="egg-cards" data-egg-cards="" ref={cardsRef}>
@@ -936,6 +1078,21 @@ export function EggPage() {
             </div>
           ) : null}
         </div>
+
+        {chatOpen && worker ? (
+          <aside className="egg-chat-pane" data-egg-chat-pane={worker.threadId}>
+            <div className="egg-chat-head egg-small egg-muted">
+              <span>the room thread's chat</span>
+              <span className="egg-spacer" />
+              <span>
+                <kbd>i</kbd> type here · <kbd>Esc</kbd> {"back / close"}
+              </span>
+            </div>
+            <div className="egg-chat" data-egg-chat="" tabIndex={-1}>
+              <ThreadChat key={worker.threadId} threadId={worker.threadId} variant="compact" layout="contained" focusRequest={focusRequest} />
+            </div>
+          </aside>
+        ) : null}
 
         {large ? (
           <div className="egg-large" data-egg-large={large.id}>
