@@ -253,6 +253,19 @@ export function parseAngles(reply: string | null | undefined, kind: RoundKind = 
   return angles;
 }
 
+/*
+ * A round takes as long as its slowest view. Measured, the slow ones are not
+ * slow at writing: they read in many small steps with long pauses between
+ * them, or go back after saving to check and edit the page. These three
+ * lines ask for few batched reads, a smaller page, and one write.
+ */
+export const VIEW_READING =
+  "Read narrowly and fast: at most three shell commands before you write, each doing several reads at once (list, grep and print just the lines you need in one command). Do not deliberate between steps.";
+export const VIEW_FORM =
+  "Either a self-contained HTML page of about 25 to 40 lines (inline CSS, no scripts: they will not run; no external resources, no images from the network, readable at 420px wide, plain and quiet, taken in at a glance),";
+export const VIEW_WRITE_ONCE =
+  "Write it once, in a single command. Do not read it back, check it or edit it afterwards: reply with the single word done as soon as it is saved.";
+
 export function viewPrompt(room: Room, line: string, angle: Angle, spec: RoundSpec = PLAIN_SPEC): string {
   const refs: string[] = [];
   const task: string[] = [];
@@ -281,12 +294,13 @@ export function viewPrompt(room: Room, line: string, angle: Angle, spec: RoundSp
     ...(refs.length
       ? ["The reference only shows what the person was looking at. Build your view from the folder itself: read the real files again, and never copy a fact or number from the reference without checking it in the folder."]
       : []),
-    `The folder to look at: ${room.folder}. It is READ ONLY: never create, change or delete anything in it. Read only the few files you need.`,
+    `The folder to look at: ${room.folder}. It is READ ONLY: never create, change or delete anything in it.`,
+    VIEW_READING,
     "Make ONE view of the real thing from your angle, built only from what you actually read or ran. Name real files and real numbers; never invent.",
-    "Either a self-contained HTML page of about 40 to 60 lines (inline CSS, no scripts: they will not run; no external resources, no images from the network, readable at 420px wide, plain and quiet),",
+    VIEW_FORM,
     "or plain text when that suits the angle better.",
     'Save it as "$BB_THREAD_STORAGE/view.html" or "$BB_THREAD_STORAGE/view.txt" (expand the variable in a shell). Write nothing else anywhere.',
-    "Then reply with the single word: done.",
+    VIEW_WRITE_ONCE,
   ].join("\n");
 }
 

@@ -61,6 +61,24 @@ export function plannedLine(kind: RoundKind, views: readonly View[], ms: number)
   if (kind === "cross") return `Two ways in ${took}: ${views.map((v) => `${v.axis ?? "?"} → ${v.angle}`).join(" · ")}`;
   return `Four angles in ${took}: ${views.map((v) => v.angle).join(" · ")}`;
 }
+/**
+ * The notebook line once every view of a round has landed or failed: how
+ * many landed and how long it took from the line, e.g. "4 views · 21 s".
+ */
+export function roundDoneLine(room: Room, round: Round, now: number): string {
+  const views = round.viewIds.map((id) => room.views[id]).filter((v): v is View => v !== undefined);
+  const done = views.filter((v) => v.status === "done").length;
+  const count = done === views.length ? `${done} view${done === 1 ? "" : "s"}` : `${done} of ${views.length} views`;
+  return `${count} · ${Math.round((now - round.at) / 1000)} s`;
+}
+
+/** Add the round's timing line if this change finished it. */
+function noteIfRoundDone(room: Room, roundId: string, wasDone: boolean) {
+  const round = findRound(room, roundId);
+  if (wasDone || round.status !== "done") return;
+  addLine(room, { kind: "did", text: roundDoneLine(room, round, Date.now()), roundId });
+}
+
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 500);
 const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
 
@@ -351,8 +369,10 @@ export function createEngine(deps: EngineDeps) {
       await store.update(room.id, (r) => viewStarted(r, view.id, thread.id, null));
     } catch (e) {
       await store.update(room.id, (r) => {
+        const wasDone = findRound(r, roundId).status === "done";
         viewStarted(r, view.id, null, `Could not start: ${errText(e)}`);
         addLine(r, { kind: "trouble", text: `"${view.angle}" could not start: ${errText(e)}`, roundId });
+        noteIfRoundDone(r, roundId, wasDone);
       });
     }
   }
@@ -400,11 +420,13 @@ export function createEngine(deps: EngineDeps) {
       const error = "error" in file ? (failure ? `${failure}; ${file.error}` : file.error) : null;
       if ("content" in file) await store.putContent(viewId, { format: file.format, content: file.content });
       await store.update(roomId, (r) => {
+        const wasDone = findRound(r, view.roundId).status === "done";
         const v = viewFinished(r, viewId, { format: "content" in file ? file.format : null, builtFrom, error });
         const took = v.startedAt ? seconds((v.finishedAt ?? Date.now()) - v.startedAt) : "?";
         addLine(r, error
           ? { kind: "trouble", text: `"${v.angle}" failed after ${took}: ${error}`, roundId: v.roundId }
           : { kind: "did", text: `"${v.angle}" landed in ${took} (${builtFromCount(builtFrom)})`, roundId: v.roundId });
+        noteIfRoundDone(r, v.roundId, wasDone);
       });
       publish(roomId);
       void sdk.threads.stop({ threadId }).catch(() => undefined);

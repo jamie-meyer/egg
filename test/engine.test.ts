@@ -170,3 +170,22 @@ test("a room made on a known environment reuses it from the first thread", async
   for (const s of spawns) assert.deepEqual(s.environment, { type: "reuse", environmentId: "env_known" });
   for (const s of spawns) assert.equal(s.projectId, "proj_9");
 });
+
+test("when a round's last view settles, the notebook says how many views landed and how long the round took", async () => {
+  const env = setup({ writes: (id) => (id === "thr_5" ? null : { name: "view.html", content: `<h1>${id}</h1>` }) });
+  const room = await roomWithRound(env);
+  const views = roundViews(room, room.rounds[0]!);
+  const timing = (r: typeof room) => r.lines.filter((l) => /views? · \d+ s$/.test(l.text));
+  for (const v of views.slice(0, 3)) await env.engine.onThreadSettled(v.threadId!, null);
+  assert.equal(timing((await env.store.get(room.id))!).length, 0, "no timing line while a view is still running");
+  await env.engine.onThreadSettled(views[3]!.threadId!, "the provider crashed");
+  const after = (await env.store.get(room.id))!;
+  const lines = timing(after);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!.text, /^3 of 4 views · \d+ s$/);
+  assert.equal(lines[0]!.roundId, after.rounds[0]!.id);
+  assert.equal(after.lines.at(-1), lines[0], "it is the round's last line");
+  // A late second notice does not add another.
+  await env.engine.onThreadSettled(views[3]!.threadId!, null);
+  assert.equal(timing((await env.store.get(room.id))!).length, 1);
+});

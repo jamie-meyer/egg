@@ -107,3 +107,13 @@ test("view prompts for derived rounds: the axis, the A/B labels, and rebuild fro
   assert.match(x, /\[A\] = "The map", \[B\] = "Sizes"/);
   assert.match(x, /READ ONLY/);
 });
+
+test("the view prompt asks for few batched reads, a small page and a single write, and keeps the folder rules", () => {
+  const room = makeRoom({ id: "room_t", subject: "s", folder: "/repo", hostId: "h", projectId: "p", dir: "/d", now: 0 });
+  const prompt = viewPrompt(room, "a line", { name: "Map", focus: "where things are" });
+  assert.match(prompt, /at most three shell commands/);
+  assert.match(prompt, /about 25 to 40 lines/);
+  assert.match(prompt, /Write it once.*Do not read it back, check it or edit it/);
+  assert.match(prompt, /READ ONLY/);
+  assert.match(prompt, /built only from what you actually read or ran/);
+});
