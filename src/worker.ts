@@ -44,13 +44,14 @@ export function standingInstructions(p: WorkerPromptInput): string {
     `- Run it from the folder the command needs (the command runs in your current directory); from a subfolder give the runner's full path. Ids are short and never reused (r1, r2, …). ${RUNNER_PATH} --list shows every run.`,
     `- Never use nohup (it fails here at once), and never start a long run with a bare & of your own: egg would not know it exists.`,
     `- Never say a run passed, failed or finished without reading its record (${m}/${RUNS_DIR}/<id>.json: exit is null while it runs) and its log. A record with no exit whose process is gone died: say so.`,
-    "- After starting long runs, do the next useful thing (another run, a script, a page). If nothing is left until they end, write a note saying what is running and end your turn: egg tells you when a run finishes, and every few minutes while runs are open. Do not sit in a loop of sleeps.",
-    `- When a message from egg says a run finished or is still running, read its record and log, and carry on with the line you were working on.`,
+    "- After starting long runs, do the next useful thing (another run, a script, your page). If nothing is left until they end, write a note saying what is running and end your turn: egg tells you when a run finishes, and every few minutes while runs are open. Do not sit in a loop of sleeps.",
+    `- When a message from egg says a run finished or is still running, read its record and log, carry on with the line you were working on, and update your page.`,
     "",
     `MATERIAL: everything you make goes in ${m}/ at the top of your workspace (create it if it is missing; it is kept out of git for you). Other threads in this room read it, and egg copies it out so it outlives this workspace. Build outputs can stay where the build puts them; only ${m}/ is saved.`,
     `- ${m}/${LEDGER_FILE}: one line per run. The runner writes these for you; write one yourself only for something you could not run through it, and egg will show it as claimed.`,
     `- ${m}/${NOTES_FILE}: append one JSON line {"at":"<ISO time>","text":"<one short line for the person>"} when you start something long, when something finishes or fails, and when you learn something worth knowing. These lines show up in the room's notebook as they come. Plain words; say what you actually ran and what you did not.`,
     `- ${m}/${VIEWS_DIR}/: pages for the room's table: <name>.html (a self-contained page, inline CSS, no scripts, no external resources, readable at 420px wide) or <name>.txt, and beside it <name>.json: {"title":"<1 to 4 words>","focus":"<one sentence: what it shows>","ledger":["r3","r4"]} naming the runs it rests on. Each page lands on the table as a card; rewriting it puts the new version there. Build pages only from runs you actually made; name real numbers.`,
+    `- A page early: as soon as you have ONE real result (a build that worked or failed, a first test run, a first count), write ${m}/${VIEWS_DIR}/status.html with status.json: where the work stands. What has run and what it showed, what is running now (run ids), what has not been tried yet and why. Rewrite it whenever that changes. Do not wait until the end: the person is watching the table, not your chat. Other pages for results worth their own card come as you have them.`,
     `- Scripts, harnesses and result files go under ${m}/ too (for example ${m}/scripts/, ${m}/results/, ${m}/logs/).`,
     ...(p.restored ? [`- ${m}/ already holds material from an earlier room thread whose workspace is gone: read ${m}/${LEDGER_FILE} and ${m}/${NOTES_FILE} first and build on it. Build outputs outside ${m}/ were not saved, so a build may need to run again.`] : []),
     "",
@@ -68,8 +69,8 @@ export function workMessage(line: string, opts: { firstSince: boolean; alsoLooki
     `The person said: ${JSON.stringify(line)}`,
     ...(opts.alsoLooking ? ["(Four quick views of the folder are being made for the same line; they will read your material. Your part is the real work.)"] : []),
     opts.firstSince
-      ? `Do it now, fully, unless it asks for a plan. Every run that matters goes through ${RUNNER_PATH} (long ones detached, short ones with --fg); write a note in ${MATERIAL_DIR}/${NOTES_FILE} as you start and as things finish; and put results worth seeing in ${MATERIAL_DIR}/${VIEWS_DIR}/ with their .json.`
-      : `Same rules as before: runs through ${RUNNER_PATH}, notes, views in ${MATERIAL_DIR}/.`,
+      ? `Do it now, fully, unless it asks for a plan. Every run that matters goes through ${RUNNER_PATH} (long ones detached, short ones with --fg); write a note in ${MATERIAL_DIR}/${NOTES_FILE} as you start and as things finish; put your first page in ${MATERIAL_DIR}/${VIEWS_DIR}/status.html as soon as you have one real result, and keep it saying where the work stands.`
+      : `Same rules as before: runs through ${RUNNER_PATH}, notes, and the status page in ${MATERIAL_DIR}/${VIEWS_DIR}/ kept up to date.`,
   ].join("\n");
 }
 

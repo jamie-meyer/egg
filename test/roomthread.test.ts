@@ -200,7 +200,7 @@ test("the room thread starts in a clone of the folder, with its standing instruc
   assert.equal("model" in spawn, false, "no model: the provider's default");
   assert.equal(spawn.visibility, "visible");
   assert.match(spawn.title, /^egg test: room thread · /);
-  for (const words of [/Do what it asks now, and fully/, /Plan first only when the line asks for a plan/, /\.egg\/bin\/run r7 "/, /--fg/, /Never use nohup/, /without reading its record/, /egg tells you when a run finishes/, /\.egg\/ledger\.jsonl/, /\.egg\/notes\.jsonl/, /\.egg\/views\//, /Never push/, /Never write outside your workspace/, /few lines/, /what you actually ran and what you did not/])
+  for (const words of [/Do what it asks now, and fully/, /Plan first only when the line asks for a plan/, /\.egg\/bin\/run r7 "/, /--fg/, /Never use nohup/, /without reading its record/, /egg tells you when a run finishes/, /status\.html/, /as soon as you have ONE real result/, /\.egg\/ledger\.jsonl/, /\.egg\/notes\.jsonl/, /\.egg\/views\//, /Never push/, /Never write outside your workspace/, /few lines/, /what you actually ran and what you did not/])
     assert.match(spawn.prompt, words);
   const r = (await w.store.get(id))!;
   assert.equal(r.worker!.kind, "clone");
