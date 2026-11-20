@@ -55,6 +55,84 @@ Then open **egg** from bb's navigation rail (or go to `/plugins/egg/egg`).
   `egg: <angle> · <subject>`, and archived when their round is superseded
   or the view is dropped.
 
+### The room thread: real work
+
+A look at the folder is not always enough. "Verify every string operation",
+"run the tests five times and show me the slowest", "build it and measure
+it": these need something built and run, not read. So a room can have one
+long-lived **room thread** that does that work, for minutes or hours, and
+whose results every other thread in the room uses.
+
+- **Routing.** The planning step that runs on every line also says where
+  the line goes, in the same call: `look` (four views, as before), `work`
+  (to the room thread), or `both`. Work is anything that cannot be had by
+  reading: run, build, verify, measure, try, produce. The notebook says
+  `To the room thread` or `Four angles…`. `w` skips the planning step and
+  sends a line straight to the room thread.
+- **It does it.** When a line asks for work, the room thread does it now
+  and fully; it plans first only when the line asks for a plan. It is told
+  to run long commands in the background with a log and to check on them,
+  to say what it actually ran and what it did not, and to keep its replies
+  short: its output is material and pages, not prose. A work line said
+  while it is busy is added to its running turn, and the notebook says so.
+- **Where it works: a copy of the folder**, never the folder itself unless
+  you say so. The *Where the room thread works* setting:
+  - `auto` (default): a copy-on-write clone, else a git worktree, else it
+    stops and says in the notebook what is missing. It never falls back to
+    the folder itself.
+  - `clone`: a copy-on-write clone from the environment provider named in
+    the *Copy-on-write environment provider* setting (default `cow-clone`,
+    which the [cow](https://github.com/jamie-meyer/cow) plugin offers; see
+    its [docs](https://github.com/jamie-meyer/cow/blob/main/docs/clone.md)).
+    macOS and APFS only; a folder whose `.git` is a file (a linked
+    worktree) is refused. A clone that fails is said in the notebook.
+  - `worktree`: bb's git worktree, when the folder is a bb project's
+    checkout.
+  - `in-place`: the folder itself.
+- **Material.** Everything it makes goes in `.egg/` at the top of its
+  workspace, kept out of git with `.git/info/exclude` (never by editing
+  `.gitignore`): `ledger.jsonl` (one entry per run: when, what for, the
+  command, where the output is, the exit status), `notes.jsonl` (short
+  progress lines), `views/` (pages for the table, each with a `.json`
+  beside it naming it and the ledger entries it rests on), and its scripts
+  and result files. Plain files, so any provider works.
+- **Synced into the room.** egg watches the room thread (its events, and a
+  timer every 20 seconds while it works): new notes become notebook lines
+  (`◆`), new pages become cards in a round of their own (*pages from the
+  room thread*), shown through the same sanitiser and frames as every
+  view, and the ledger is kept with the room.
+- **Material outlives the clone.** Each sync copies `.egg/` to
+  `<room directory>/material/`, skipping any file over the *Largest
+  material file copied out* setting (default 20 MB) and saying so. Build
+  outputs elsewhere are not copied. If the workspace is gone, the next work
+  line starts a fresh room thread and puts the saved material back before
+  its first task.
+- **Views use it.** Once there is a room thread, view threads run in its
+  workspace, read `.egg/ledger.jsonl` first, prefer its real results over
+  deriving anything again, and say which ledger entries they rest on.
+  "Built from" lists those entries above the view's own reads and
+  commands.
+- **"Built from" is never the model's word alone.** A ledger entry a view
+  names is checked against the commands the room thread's own events show
+  it ran; one that does not show there is marked *not in the room thread's
+  own events*.
+- **The status line.** While a room has a room thread, one line under the
+  top bar says its state (`starting`, `running`, `waiting on you`,
+  `failed`, `idle`), for how long, its latest step, and the tokens in its
+  context. A long silence in a running turn reads `quiet for N min`, not
+  stuck: long runs are normal here.
+- **Its chat.** `t` opens the room thread's chat in a pane beside the
+  table; bb's own questions and permission requests for it are answered
+  there. The page keeps the keyboard until you press `i`; Escape gives it
+  back, and Escape again closes the pane. `S` stops its turn after a
+  one-key confirm (`y`).
+- The room thread is titled `egg: room thread · <subject>` and shows in
+  bb's sidebar. Deleting the room archives it (bb then removes its clone);
+  its material stays in the room's directory.
+
+Set *Model for the room thread* to the best model available to you. Left
+empty, the room thread runs on the provider's default model.
+
 ### Going further from a view
 
 Each of these works on the selected view, on the table or in the kept
@@ -112,6 +190,11 @@ Press `?` on the page for this legend.
 | Key | Does |
 | --- | --- |
 | `i` (or `a`) | open the line input; Enter sends, Escape leaves |
+| `w` | a line straight to the room thread, with no planning step |
+| `t` | open or close the room thread's chat beside the table |
+| `i` (chat open) | type in the room thread's chat; Escape gives the keyboard back |
+| Escape (chat open) | close the chat |
+| `S` | stop the room thread's turn; `y` confirms, any other key leaves it running |
 | paste | open the line input with the pasted text |
 | hold Space | record a line; release to transcribe |
 | `h` `l` | previous, next card (arrows too); `0` `$` first, last |
@@ -147,6 +230,8 @@ Ctrl-n, Ctrl-p) pick from.
 - **Rooms** (their lines, rounds, views and what each view was built from)
   are kept in egg's plugin storage inside bb's data directory, so they
   survive reloads and restarts.
+- **The room thread's material** is copied to `<room directory>/material/`
+  on every sync (see above).
 - **Kept views are plain files.** Each room has a directory under the
   *Rooms directory* setting (default `~/egg`); the page shows its path.
   Keeping a view writes the view (`.html` or `.txt`) and a small `.json`
@@ -159,9 +244,12 @@ Ctrl-n, Ctrl-p) pick from.
 ## What it sends to model providers
 
 egg runs agent threads through bb on the provider and models you choose
-(defaults: `claude-code`, `claude-sonnet-5-5` for views and
-`claude-haiku-5-5` for planning). **Those agents read the contents of the
-folder a room points at**, and what they read goes to that provider. The
+(defaults: `claude-code`, `claude-sonnet-5-5` for views,
+`claude-haiku-5-5` for planning, and the provider's default model for the
+room thread). **Those agents read the contents of the folder a room points
+at**, and what they read goes to that provider. The room thread also runs
+commands in its copy of the folder (builds, tests, harnesses), and what
+they print goes to the provider too. The
 planning step sends the room's subject, its earlier lines and the names of
 kept and dropped views, and, for a variation, cross, zoom or pinned round,
 the text of the parent views. Hold-to-talk sends your recording to whatever voice
@@ -212,23 +300,40 @@ must see no request.
 
 ## Settings
 
-`bb plugin config egg` lists them: models for views and for planning, the
-provider, the permission mode for view threads, the rooms directory, the
-hold-to-talk key (Space, backquote, or off), *send a pasted line at once*,
-and the prefix of thread titles.
+`bb plugin config egg` lists them: the model, provider and permission mode
+for each role (views, the planning step, the room thread), where the room
+thread works (`auto`, `clone`, `worktree`, `in-place`), the copy-on-write
+environment provider, the largest material file copied out, the rooms
+directory, the hold-to-talk key (Space, backquote, or off), *send a pasted
+line at once*, and the prefix of thread titles. Nothing assumes one model:
+some machines cannot use the top one.
 
 ## Development
+
+Checks never touch the egg you use. Make a copy under its own plugin id,
+rooms directory and thread title prefix, and check that:
+
+```sh
+node scripts/copy-for-checks.mjs --out /tmp/egg-check   # plugin id egg-check
+bb plugin install /tmp/egg-check --yes
+node scripts/e2e.mjs --plugin egg-check --folder <absolute folder> --only work
+bb plugin uninstall egg-check
+```
+
+`scripts/e2e.mjs` and `scripts/round-timing.mjs` refuse the plugin id `egg`
+unless given a long, explicit flag.
 
 ```sh
 npm test                     # unit tests
 npm run typecheck
 node scripts/sandbox-check.mjs   # needs Chrome
-node scripts/e2e.mjs --folder <absolute folder> [--plugin <id>]   # needs Chrome and a running bb
+node scripts/e2e.mjs --folder <absolute folder> [--plugin egg-check]   # needs Chrome and a running bb
 node scripts/e2e.mjs --room <room id> --only large,compare,timing   # a few sections on an existing room
 node scripts/round-timing.mjs --folder <absolute folder> [--rounds 2] [--plugin <id>]   # where a round's time goes
 ```
 
-The whole end-to-end pass starts 23 agent threads; the sections and what
+The whole end-to-end pass starts about 32 agent threads (the `work`
+section alone about 9, and it runs for up to 40 minutes); the sections and what
 each costs are listed at the top of `scripts/e2e.mjs`.
 
 ## Licence

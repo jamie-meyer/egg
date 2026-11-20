@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.0
+
+- **A room thread.** A room can have one long-lived thread that does real
+  work: builds, writes scripts and harnesses, runs them for minutes or
+  hours. It starts the first time a line asks for work and stays for the
+  life of the room.
+- **Lines are routed.** The planning step that runs on every line also
+  returns a route in the same call: `look` (four views), `work` (the room
+  thread) or `both`. `w` sends a line straight to the room thread. A work
+  line while it is busy is added to its running turn, and the notebook
+  says so.
+- **It works in a copy.** A copy-on-write clone (the `cow-clone`
+  environment provider) or a git worktree; never the folder itself unless
+  the new *Where the room thread works* setting is `in-place`. A way that is
+  not available is said in the notebook, with why.
+- **Material.** It keeps what it makes in `.egg/` (a ledger of runs,
+  notes, pages, scripts, results), kept out of git with `info/exclude`.
+  Notes become notebook lines, pages become cards in a round of their own,
+  and `.egg/` is copied to the room's directory, so it outlives the clone;
+  a fresh room thread gets it back.
+- **Views use it.** Once there is a room thread, views run in its
+  workspace, read its ledger first and cite it. "Built from" lists the
+  ledger entries a view rests on, each checked against what the room
+  thread's own events show it ran.
+- **On the page.** A status line for the room thread (state, how long, its
+  latest step, tokens), its chat in a pane beside the table (`t`, `i` to
+  type, Escape), and `S` to stop its turn.
+- Model, provider and permission mode are settings per role: views,
+  planning, room thread. The room thread's model defaults to the provider's
+  default.
+- `scripts/copy-for-checks.mjs` makes a copy for checks under its own
+  plugin id; the end-to-end scripts refuse the id `egg` unless told.
+
 ## 0.1.1
 
 - Rounds are faster: about 16 to 18 seconds instead of 21 to 28 for a plain
