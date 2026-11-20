@@ -46,7 +46,8 @@ Then open **egg** from bb's navigation rail (or go to `/plugins/egg/egg`).
   earlier lines and which views you kept or dropped. Four cards appear at
   once, and four agent threads, one per angle, read the folder and each
   write one small page (or plain text). Each card fills in as its thread
-  finishes; a round takes about 20 seconds.
+  finishes; a round takes 15 to 20 seconds, and when it completes its
+  notebook line says how long (`4 views · 16 s`).
 - **Every view says what it was built from**: the files its thread read and
   the commands it ran, taken from the thread's own event stream, not from
   what the model says it did. Press `b` to see it.
@@ -223,7 +224,12 @@ npm test                     # unit tests
 npm run typecheck
 node scripts/sandbox-check.mjs   # needs Chrome
 node scripts/e2e.mjs --folder <absolute folder> [--plugin <id>]   # needs Chrome and a running bb
+node scripts/e2e.mjs --room <room id> --only large,compare,timing   # a few sections on an existing room
+node scripts/round-timing.mjs --folder <absolute folder> [--rounds 2] [--plugin <id>]   # where a round's time goes
 ```
+
+The whole end-to-end pass starts 23 agent threads; the sections and what
+each costs are listed at the top of `scripts/e2e.mjs`.
 
 ## Licence
 

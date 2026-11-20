@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-egg",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An ideation room: point it at a folder, say a half-formed thought, and compare a few views of the real thing side by side.",
   "license": "MIT",
   "type": "module",
