@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Room, Round, View } from "./model.ts";
 import type { ViewContent } from "./store.ts";
 
-export const DEFAULT_ROOMS_DIR = "~/egg";
+export { DEFAULT_ROOMS_DIR } from "./identity.ts";
 
 export function expandHome(path: string, home = homedir()): string {
   if (path === "~") return home;

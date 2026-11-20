@@ -6,7 +6,8 @@ import { isAbsolute } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { type EngineSettings, type PermissionMode, createEngine } from "./src/engine.ts";
-import { DEFAULT_ROOMS_DIR, expandHome } from "./src/kept.ts";
+import { DEFAULT_ROOMS_DIR, DEFAULT_TITLE_PREFIX } from "./src/identity.ts";
+import { expandHome } from "./src/kept.ts";
 import { roomSchema, roomSummarySchema, summarize } from "./src/model.ts";
 import { createStore } from "./src/store.ts";
 
@@ -116,7 +117,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Thread title prefix",
       description: "egg's hidden threads are titled '<prefix>: <angle> · <subject>'.",
-      default: "egg",
+      default: DEFAULT_TITLE_PREFIX,
     },
   });
 
@@ -128,7 +129,7 @@ export default async function plugin(bb: BbPluginApi) {
       providerId: s.providerId.trim() || "claude-code",
       permissionMode: (["auto", "accept-edits", "full"].includes(s.permissionMode) ? s.permissionMode : "auto") as PermissionMode,
       roomsDir: s.roomsDir.trim() || DEFAULT_ROOMS_DIR,
-      titlePrefix: s.threadTitlePrefix.trim() || "egg",
+      titlePrefix: s.threadTitlePrefix.trim() || DEFAULT_TITLE_PREFIX,
     };
   }
 

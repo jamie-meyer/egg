@@ -29,8 +29,8 @@
 // Deleting a room archives its view threads; planning threads are archived
 // as each answers. The script prints every view thread id so you can check.
 //
-//   node scripts/e2e.mjs --folder <absolute folder> [--plugin egg] [--bb http://127.0.0.1:38886] [--shots <dir>]
-//   node scripts/e2e.mjs --room <room id> --only large,compare,timing [--plugin egg]
+//   node scripts/e2e.mjs --folder <absolute folder> [--plugin egg-check] [--bb http://127.0.0.1:38886] [--shots <dir>]
+//   node scripts/e2e.mjs --room <room id> --only large,compare,timing [--plugin egg-check]
 //
 // --plugin is the plugin id egg is installed under (for a test copy
 // installed beside the real one, for example). Needs Chrome; run it outside
@@ -46,7 +46,14 @@ const option = (name, fallback) => {
   return i >= 0 ? args[i + 1] : fallback;
 };
 const bb = option("bb", "http://127.0.0.1:38886");
-const plugin = option("plugin", "egg");
+const plugin = option("plugin", "egg-check");
+// The installed egg is the one a person uses: its rooms, threads and settings
+// are theirs. Checks run against a copy (scripts/copy-for-checks.mjs).
+const TOUCH_INSTALLED = "--i-know-this-runs-against-the-installed-egg-and-its-rooms";
+if (plugin === "egg" && !args.includes(TOUCH_INSTALLED)) {
+  console.error(`Refusing to run against the plugin id egg, the installed egg. Make a copy with scripts/copy-for-checks.mjs and pass --plugin egg-check, or pass ${TOUCH_INSTALLED}.`);
+  process.exit(2);
+}
 const folder = option("folder");
 const shots = option("shots");
 const reuse = option("room");

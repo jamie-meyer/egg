@@ -21,7 +21,14 @@ const option = (name, fallback) => {
 };
 const flag = (name) => args.includes(`--${name}`);
 const bb = option("bb", "http://127.0.0.1:38886");
-const plugin = option("plugin", "egg");
+const plugin = option("plugin", "egg-check");
+// The installed egg is the one a person uses: its rooms, threads and settings
+// are theirs. Checks run against a copy (scripts/copy-for-checks.mjs).
+const TOUCH_INSTALLED = "--i-know-this-runs-against-the-installed-egg-and-its-rooms";
+if (plugin === "egg" && !args.includes(TOUCH_INSTALLED)) {
+  console.error(`Refusing to run against the plugin id egg, the installed egg. Make a copy with scripts/copy-for-checks.mjs and pass --plugin egg-check, or pass ${TOUCH_INSTALLED}.`);
+  process.exit(2);
+}
 const folder = option("folder");
 const rounds = Number(option("rounds", "2"));
 const threadsOnly = option("threads");
