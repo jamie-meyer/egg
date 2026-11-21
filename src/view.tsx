@@ -497,8 +497,9 @@ export function EggPage() {
     } else setRoom(null);
   }, [roomId, loadRoom, enrolled]);
   useEffect(() => {
-    if (enrolled && !roomId && rooms.length === 0 && !creating) setCreating({ line: "" });
-  }, [roomId, rooms.length, enrolled]);
+    // Not while another browser's key waits to be approved: the form would cover that line and take the keys that answer it.
+    if (enrolled && !roomId && rooms.length === 0 && !creating && !keyRequest) setCreating({ line: "" });
+  }, [roomId, rooms.length, enrolled, keyRequest === null]);
   // A browser that is not enrolled, or no longer is, shows nothing: what it had read goes off the page.
   const shut = signer.status === "pending" || signer.status === "refused" || signer.status === "unavailable";
   useEffect(() => {

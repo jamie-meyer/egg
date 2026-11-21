@@ -1,6 +1,6 @@
 // One way to write a JSON value as text, so that two sides that hold the same
-// value get the same bytes: keys sorted, no spaces. The log hashes it, and
-// the page and the backend sign and verify it.
+// value get the same bytes: keys sorted, no spaces. The page and the
+// backend sign and verify it.
 
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
