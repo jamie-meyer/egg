@@ -14,6 +14,14 @@
 //   zoom     zoom into a part (z): a child room and its first round; keep    5
 //   pin      pin a view (p) and say a line with it pinned                    5
 //   up       back up to the parent room (-), at the view zoomed from         0
+//   signing  another key asks: X refuses it. The page's own key removed:     0
+//            the page goes blank and says what to do, a new room is not
+//            made and the notebook says why; approved again, it is back.
+//            A page whose clock is ten minutes off still works.
+//   probe    scripts/probe.mjs: every signed action tried unsigned, forged,  0
+//            replayed, stale and with changed arguments; each refused, and
+//            nothing changed
+//   workstop a room whose first line is work; stop its room thread (S, y)    2
 //   rooms    the indented room list; delete the test rooms (D, u once)       0
 //   work     a room whose first line asks for work: the room thread runs     ~9
 //            it in a clone; notes, a page citing the ledger, runs through
@@ -23,13 +31,15 @@
 //            killed, no wake after), the chat pane, material on disk, and
 //            the folder untouched. Long: up to 50 min.
 //
-// All of it is 23 threads. To check one change with a handful, run a subset
+// All but work is 25 threads; enrol, signing and probe start none. To check one change with a handful, run a subset
 // with --only, and reuse a room that already has a finished round with
 // --room (from the room list, or kept from a run of scripts/round-timing.mjs
 // --keep-room); "new" is then skipped. Sections run in the order above. A
 // section that needs something an earlier one makes (up needs zoom, rooms
 // needs new) is skipped with a note when that is missing. Rooms this run
 // makes are deleted at the end; a room given with --room is left alone.
+// --keep-rooms leaves this run's rooms for a later run to reuse, and
+// --adopt-room makes the --room one this run's own (rooms may then delete it).
 //
 // Set the plugin's "Thread title prefix" setting to "egg test" first so the
 // threads are easy to find, and its rooms directory to a scratch folder.
@@ -42,12 +52,28 @@
 // --plugin is the plugin id egg is installed under (for a test copy
 // installed beside the real one, for example). Needs Chrome; run it outside
 // any command sandbox.
+//
+// Signing. egg acts only on calls signed by an enrolled key
+// (docs/security.md), so every pass starts with a step of its own, "enrol":
+// the copy's enrolment is reset with the reset file, the test browser opens
+// the page and is enrolled silently as the first to ask, and this script's
+// own key (scripts/signer.mjs) asks next and is approved by pressing A, then y,
+// on the page. From then on the page signs with its key and the script's
+// direct calls are signed with the script's. Against the installed egg (the
+// long flag below) nothing is reset: approve the script's key on your page.
+//
+// --probe-dir <dir>: the probe section hands its material to an attacker
+// run elsewhere (node scripts/probe.mjs --dir <dir> --sandboxed, from inside
+// an agent's sandbox) and waits for its report, instead of running the
+// attempts itself.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { firstPage, launchChrome, sleep } from "./cdp.mjs";
+import { attack, prepare, snapshot } from "./probe.mjs";
+import { enrolledSigner, makeSigner, rawRpc, resetEnrolment } from "./signer.mjs";
 
-const SECTIONS = ["new", "large", "keep", "timing", "more", "compare", "cross", "zoom", "pin", "up", "rooms", "work"];
+const SECTIONS = ["new", "large", "keep", "timing", "more", "compare", "cross", "zoom", "pin", "up", "signing", "probe", "workstop", "rooms", "work"];
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -66,6 +92,11 @@ if (plugin === "egg" && !args.includes(TOUCH_INSTALLED)) {
 const folder = option("folder");
 const shots = option("shots");
 const reuse = option("room");
+const probeDir = option("probe-dir");
+/** Leave the rooms this run makes, for a later run with --room. */
+const keepRooms = args.includes("--keep-rooms");
+/** Treat the room given with --room as this run's own: rooms may delete it, and it goes at the end. */
+const adoptRoom = args.includes("--adopt-room");
 const only = option("only")?.split(",").map((s) => s.trim()).filter(Boolean) ?? null;
 const unknown = (only ?? []).filter((s) => !SECTIONS.includes(s));
 if (unknown.length || (!folder && !reuse)) {
@@ -75,11 +106,11 @@ if (unknown.length || (!folder && !reuse)) {
 }
 const wanted = new Set((only ?? SECTIONS).filter((s) => !(reuse && s === "new")));
 const pageUrl = `${bb}/plugins/${plugin}/egg`;
+/** This script's own key, enrolled in the "enrol" step: its direct calls are signed with it. */
+let signer = null;
 const rpc = async (method, input) => {
-  const res = await fetch(`${bb}/api/v1/plugins/${plugin}/rpc/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
-  const body = await res.json();
-  if (!res.ok || body.error) throw new Error(`${method}: ${JSON.stringify(body).slice(0, 300)}`);
-  return body.result;
+  if (!signer) throw new Error(`${method}: the script's key is not enrolled yet`);
+  return signer.call(method, input);
 };
 
 const results = [];
@@ -132,7 +163,7 @@ async function waitRound(page, n, cards, t0, label) {
 
 const viewThreads = new Set();
 /** Rooms this run made; they are deleted at the end. A reused room is not. */
-const roomIds = [];
+const roomIds = reuse && adoptRoom ? [reuse] : [];
 async function collectThreads(roomId) {
   try {
     const { room } = await rpc("room_get", { roomId });
@@ -144,7 +175,7 @@ async function collectThreads(roomId) {
 }
 
 /** What sections hand on to later ones. */
-const ctx = { parentRoomId: reuse ?? null, subject: null, childRoomId: null, zoomFrom: null, zoomRound: 0, keptPath: null, markA: null, markB: null };
+const ctx = { pageKey: null, parentRoomId: reuse ?? null, subject: null, childRoomId: null, zoomFrom: null, zoomRound: 0, keptPath: null, markA: null, markB: null };
 
 /** Mark the first two finished cards A and B, unless two are marked already. */
 async function markTwo(page) {
@@ -293,7 +324,217 @@ async function runsOutliveTheTurn(page, roomId) {
   await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'idle'", 10 * 60_000, "and settles");
 }
 
+const signingLine = (page) => page.eval("(() => { const el = document.querySelector('[data-egg-signing]'); return el ? { status: el.dataset.eggSigning, key: el.dataset.eggOwnKey, text: el.textContent } : null; })()");
+const keyRequest = (page) => page.eval("(() => { const el = document.querySelector('[data-egg-key-request]'); return el ? { key: el.dataset.eggKeyRequest, text: el.textContent } : null; })()");
+const unsentLines = (page) => page.eval("[...document.querySelectorAll('[data-egg-unsent]')].map((l) => l.textContent)");
+const closeNewRoomForm = async (page) => {
+  if (!(await page.eval("!!document.querySelector('[data-egg-new-room]')"))) return;
+  await page.eval("document.querySelector('[data-egg-folder]').focus()");
+  await page.key("Escape");
+  await page.waitFor("!document.querySelector('[data-egg-new-room]')", { label: "the new-room form closes" });
+};
+
+/**
+ * Always first: the test browser and this script get enrolled. On a copy for
+ * checks enrolment is reset before the page opens, so the page's key is the
+ * first to ask; the script's key asks second and A on the page approves it.
+ */
+async function enrol(page) {
+  const fresh = plugin !== "egg";
+  const state = await waitFor(() => rawRpc(bb, plugin, "keys_state", null).then((r) => r.result), (st) => fresh ? st?.keys.length > 0 : true, 20_000, 250);
+  if (fresh) {
+    const first = state.keys[0];
+    ctx.pageKey = first?.fingerprint ?? null;
+    check(state.keys.length === 1 && first.how === "first" && first.approvedBy === null, `opening the page enrols the test browser's key, the first to ask (${first?.fingerprint}, "${first?.label}")`);
+    check((await signingLine(page)) === null && (await keyRequest(page)) === null, "and the page says nothing about it: the first enrolment is silent");
+    check(state.resetPath.endsWith(`/plugins/${plugin}/reset-enrollment`), `the reset file is this copy's own (${state.resetPath})`);
+  }
+  signer = await enrolledSigner({
+    bb,
+    plugin,
+    approve: async (fingerprint) => {
+      if (!fresh) return console.log(`The script's key ${fingerprint} waits: open egg's page in a browser where it works and press A, then y.`);
+      await page.waitFor(`document.querySelector('[data-egg-key-request]')?.dataset.eggKeyRequest === ${JSON.stringify(fingerprint)}`, { label: "the page shows the script's key asking" });
+      const line = await keyRequest(page);
+      check(line.text.includes(fingerprint) && /approves it/.test(line.text) && /refuses it/.test(line.text), `a second key asking shows as a plain line on the enrolled page: "${line.text.slice(0, 150)}…"`);
+      // Before A: the key that asks can do nothing, not even read.
+      const early = await rawRpc(bb, plugin, "signed", await (await makeSigner({ bb, plugin })).sign("rooms_list", null));
+      check(!early.ok && /not enrolled/.test(early.error), `a key that is not enrolled is refused everything, reading included (${early.error})`);
+      await closeNewRoomForm(page);
+      await focusRoot(page);
+      // A alone approves nothing: it asks, and any key but y leaves the request waiting.
+      await page.key("A");
+      await page.waitFor(`document.querySelector('[data-egg-confirm-approve]')?.dataset.eggConfirmApprove === ${JSON.stringify(fingerprint)}`, { label: "the page asks before approving" });
+      await page.key("n");
+      await sleep(600);
+      const still = (await rawRpc(bb, plugin, "keys_state", null)).result;
+      check(!still.keys.some((k) => k.fingerprint === fingerprint) && still.requests.some((r) => r.fingerprint === fingerprint && r.status === "pending") && !(await page.eval("!!document.querySelector('[data-egg-new-room]')")), "A then any key but y approves nothing, and that key does nothing else");
+      await page.key("A");
+      await page.waitFor("!!document.querySelector('[data-egg-confirm-approve]')", { label: "the page asks again" });
+      await page.key("y");
+    },
+  });
+  const mine = (await signer.state()).keys.find((k) => k.fingerprint === signer.fingerprint);
+  check(!!mine && mine.how === (fresh ? "approved" : mine.how), `the script's key ${signer.fingerprint} is enrolled (${mine?.how}${mine?.approvedBy ? ` by ${mine.approvedBy}` : ""})`);
+  if (fresh) {
+    check(mine?.approvedBy === ctx.pageKey, "A then y on the page approved it, signed with the page's key");
+    await page.waitFor("!document.querySelector('[data-egg-key-request]')", { label: "the request line goes" });
+  }
+  // A test browser that came second (the installed egg, with the long flag): the script, once approved, approves it.
+  const waiting = await signingLine(page);
+  if (waiting?.status === "pending" && waiting.key) {
+    ctx.pageKey = waiting.key;
+    await rpc("key_approve", { fingerprint: waiting.key });
+    await page.waitFor("!document.querySelector('[data-egg-signing]')", { label: "the test browser is approved" });
+  }
+  check((await rpc("rooms_list", null)).rooms !== undefined, "the script's signed calls are accepted");
+}
+
+/** Every file under a room's directory, with its size: kept views and material. */
+function filesUnder(dir) {
+  const out = [];
+  const walk = (d) => {
+    let names = [];
+    try {
+      names = readdirSync(d).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const full = join(d, name);
+      const info = statSync(full);
+      if (info.isDirectory()) walk(full);
+      else out.push(`${full.slice(dir.length)} ${info.size}`);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
 const steps = {
+  // ---- Signing as the person sees it: refusing a key, a page that is not enrolled, and one whose clock is off.
+  async signing(page) {
+    if (!ctx.pageKey) return console.log("(skipped signing: it removes and re-approves the test browser's key, so it needs to know it)");
+    await closeNewRoomForm(page);
+    // X refuses a key that asks.
+    const third = await makeSigner({ bb, plugin, label: "egg test: a third key" });
+    check((await third.enrol()) === "pending", "a third key asks to be enrolled");
+    await page.waitFor(`document.querySelector('[data-egg-key-request]')?.dataset.eggKeyRequest === ${JSON.stringify(third.fingerprint)}`, { label: "the page shows the third key asking" });
+    await focusRoot(page);
+    await page.key("X");
+    await page.waitFor("!document.querySelector('[data-egg-key-request]')", { label: "the request line goes after X" });
+    const refusedKey = (await signer.state()).requests.find((r) => r.fingerprint === third.fingerprint);
+    check(refusedKey?.status === "refused" && !(await third.enrolled()), "X on the page refuses it: it is not enrolled, and its request is marked refused");
+    await rpc("key_remove", { fingerprint: third.fingerprint });
+
+    // The page's own key is removed (as from another enrolled browser): it becomes a browser that is not enrolled.
+    const hadRoom = await page.eval("!!document.querySelector('[data-egg-subject]')");
+    const roomsBefore = (await rpc("rooms_list", null)).rooms.length;
+    // First with as many keys already waiting as egg keeps: this browser cannot even get on the list, and says so.
+    const fillers = [];
+    for (let i = 0; i < 8; i++) {
+      const filler = await makeSigner({ bb, plugin, label: `egg test: filler ${i + 1}` });
+      if ((await filler.enrol()) === "pending") fillers.push(filler.fingerprint);
+    }
+    await rpc("key_remove", { fingerprint: ctx.pageKey });
+    await page.waitFor("document.querySelector('[data-egg-signing]')?.dataset.eggSigning === 'pending'", { label: "the page says it is not enrolled" });
+    const crowdedLine = await signingLine(page);
+    check(fillers.length === 8 && /Other keys wait to be approved ahead of it/.test(crowdedLine.text) && /refuse those you do not know \(X\)/.test(crowdedLine.text), `with 8 keys waiting already, a browser that cannot get on the list says so: "${crowdedLine.text.slice(0, 230)}…"`);
+    for (const fingerprint of fillers) await rpc("key_remove", { fingerprint });
+    // It keeps asking, and gets on the list once there is room.
+    await page.waitFor("!/Other keys wait/.test(document.querySelector('[data-egg-signing]')?.textContent ?? 'Other keys wait')", { timeout: 20000, label: "the page asks again" });
+    check((await signer.state()).requests.some((r) => r.fingerprint === ctx.pageKey && r.status === "pending"), "once there is room it asks again by itself, and is on the list");
+    const line = await signingLine(page);
+    const resetPath = (await signer.state()).resetPath;
+    check(line.key === ctx.pageKey, `the browser keeps its key (${line.key}) and asks with it again`);
+    check(line.text.includes(ctx.pageKey) && /not enrolled with egg/.test(line.text) && /A, then y, approves it/.test(line.text) && line.text.includes(`touch ${resetPath}`), `a browser that is not enrolled shows one plain line saying what to do: "${line.text}"`);
+    await page.waitFor("!document.querySelector('[data-egg-subject]') && document.querySelectorAll('[data-egg-card]').length === 0", { label: "the page goes blank" });
+    check((await count(page, "[data-egg-line]:not([data-egg-unsent])")) === 0, "and shows nothing: no room, no lines, no views");
+    await shot(page, "s1-not-enrolled");
+    // What it tries is not done, and the notebook says so.
+    await focusRoot(page);
+    await page.key("n");
+    await page.waitFor("!!document.querySelector('[data-egg-new-room]')", { label: "the new-room form" });
+    await page.eval(`(() => { const el = document.querySelector('[data-egg-folder]'); el.focus(); el.select(); })()`);
+    await page.type(folder ?? "/tmp");
+    await page.eval("document.querySelector('[data-egg-first-line]').focus()");
+    await page.type("a room from a browser that is not enrolled");
+    await page.key("Enter");
+    await page.waitFor("document.querySelectorAll('[data-egg-unsent]').length > 0", { label: "the notebook says it was not made" });
+    const said = (await unsentLines(page)).at(-1);
+    check(/^!?\s*The room was not made: this browser is not enrolled with egg\. The line at the top/.test(said), `a call the page could not sign is said in the notebook, in plain words: "${said}"`);
+    check(/The room was not made/.test(await page.eval("document.querySelector('[data-egg-new-room] .egg-trouble')?.textContent ?? ''")), "and on the form");
+    await closeNewRoomForm(page);
+    check((await rpc("rooms_list", null)).rooms.length === roomsBefore, "no room was made");
+    await shot(page, "s2-not-made");
+    // Approved again, by a call signed with another enrolled key: everything is back.
+    await rpc("key_approve", { fingerprint: ctx.pageKey });
+    await page.waitFor("!document.querySelector('[data-egg-signing]')", { label: "the line goes once approved" });
+    if (hadRoom) await page.waitFor(`!!document.querySelector('[data-egg-subject]') && ${cardsOnTable}.length > 0`, { timeout: 30000, label: "the room is back" });
+    check((await unsentLines(page)).length === 0, `approved again, the page works as before${hadRoom ? ": its room is back" : ""}, and the notebook's line about it is gone`);
+
+    // A page whose clock is wrong still signs by egg's clock: p pins and unpins.
+    if (hadRoom && (await selectFirstDone(page))) {
+      await page.eval("(() => { const real = Date.now.bind(Date); window.__eggRealNow = real; Date.now = () => real() - 10 * 60_000; })()");
+      await focusRoot(page);
+      await page.key("p");
+      const pinned = await page.waitFor("!!document.querySelector('[data-egg-pin]')", { timeout: 15000, label: "pinned with the clock off" }).then(() => true, () => false);
+      check(pinned, "with the page's clock ten minutes off, p still pins: the page reads egg's clock and signs again");
+      await page.key("p");
+      await page.waitFor("!document.querySelector('[data-egg-pin]')", { timeout: 15000, label: "unpinned" }).catch(() => undefined);
+      await page.eval("Date.now = window.__eggRealNow");
+      check((await unsentLines(page)).length === 0, "and nothing is said in the notebook for it");
+    } else console.log("(skipped the clock check: it pins a finished view, so it needs a room with one)");
+  },
+
+  // ---- The probe: every signed action, tried without the person's key.
+  async probe() {
+    if (plugin === "egg") return console.log("(skipped probe: it runs against a copy for checks only)");
+    if (!ctx.parentRoomId) return console.log("(skipped probe: it aims at a room, so it needs new or --room)");
+    const room = (await waitFor(() => rpc("room_get", { roomId: ctx.parentRoomId }), (r) => Object.values(r.room?.views ?? {}).every((v) => v.status === "done" || v.status === "failed"), 120_000)).room;
+    const done = Object.values(room.views).filter((v) => v.status === "done").map((v) => v.id);
+    if (done.length < 2) return check(false, "the probe needs a room with two finished views");
+    const fixture = { roomId: room.id, viewId: done[0], viewId2: done[1], folder: room.folder, keyFingerprint: "0000-0000-0000-0000" };
+    const before = await snapshot(signer, filesUnder);
+    let report = null;
+    if (probeDir) {
+      mkdirSync(probeDir, { recursive: true });
+      console.log(`   waiting for an attacker elsewhere: node scripts/probe.mjs --plugin ${plugin} --dir ${probeDir} --sandboxed`);
+      for (let round = 0; round < 20 && !report; round++) {
+        const material = await prepare(signer, fixture);
+        writeFileSync(join(probeDir, "material.json"), JSON.stringify(material));
+        const file = join(probeDir, `attack-${material.id}.json`);
+        // An attacker that took this material is given time to finish with it.
+        for (let i = 0; i < 180 && !report; i++) {
+          if (existsSync(file)) report = JSON.parse(readFileSync(file, "utf8"));
+          else if (i >= 30 && !existsSync(join(probeDir, `taken-${material.id}`))) break;
+          else await sleep(1000);
+        }
+      }
+      if (!report) return check(false, `no attacker reported in ${probeDir}`);
+    } else {
+      report = await attack({ bb, plugin, material: await prepare(signer, fixture), log: () => undefined });
+    }
+    // The attacker's own key is a request and nothing more; it is taken off again.
+    const asked = (await signer.state()).requests.find((r) => r.fingerprint === report.attackerKey);
+    check(asked?.status === "pending" && !(await signer.state()).keys.some((k) => k.fingerprint === report.attackerKey), `the attacker's own key ${report.attackerKey} became a request the person sees, and was not enrolled`);
+    if (asked) await rpc("key_remove", { fingerprint: report.attackerKey });
+    const kinds = {};
+    for (const a of report.attempts) {
+      const kind = /^[a-z_]+: /.test(a.what) ? a.what.slice(a.what.indexOf(": ") + 2).replace(/ \(.*\)$/, "") : a.what;
+      kinds[kind] ??= { tried: 0, refused: 0, said: a.got };
+      kinds[kind].tried++;
+      if (a.ok) kinds[kind].refused++;
+    }
+    for (const [kind, k] of Object.entries(kinds)) check(k.refused === k.tried, `probe, ${kind}: ${k.refused} of ${k.tried} as expected ("${k.said.slice(0, 90)}")`);
+    for (const w of report.wrong) check(false, `probe: ${w.what} → ${w.got} (expected: ${w.expected})`);
+    check(report.accepted === null, `egg accepted none of the ${report.attempts.length} attempts${report.accepted ? ` (ACCEPTED: ${report.accepted})` : ""}${report.sandboxed ? ", made from inside an agent's sandbox" : ""}`);
+    for (const o of report.outside ?? []) console.log(`   outside egg, ${o.blocked ? "blocked" : "OPEN"}: ${o.what}: ${o.result}`);
+    const after = await snapshot(signer, filesUnder);
+    check(after.text === before.text, `nothing changed: the ${before.rooms.length} room(s) with every line, round, view and pin, the ledgers, the files in the rooms' directories and the enrolled keys are as before (${before.text.length} characters compared)`);
+    ctx.probe = { attempts: report.attempts.length, sandboxed: report.sandboxed, outside: report.outside };
+  },
+
   // ---- A new room: the folder default and the list of checkouts, then round 1.
   async new(page) {
     if (!(await page.eval("!!document.querySelector('[data-egg-new-room]')"))) {
@@ -383,7 +624,8 @@ const steps = {
   async compare(page) {
     ctx.markA = ctx.markB = null;
     await markTwo(page);
-    const marks = await page.eval(`[...document.querySelectorAll('[data-egg-mark]')].filter((c) => c.dataset.eggMark).map((c) => [c.dataset.eggCard, c.dataset.eggMark])`);
+    // On the table only: a kept view marked there shows its mark in the kept strip too.
+    const marks = await page.eval(`[...document.querySelectorAll('[data-egg-cards] [data-egg-mark]')].filter((c) => c.dataset.eggMark).map((c) => [c.dataset.eggCard, c.dataset.eggMark])`);
     check(JSON.stringify(marks) === JSON.stringify([[ctx.markA, "A"], [ctx.markB, "B"]]), `v marks two views, A then B (${JSON.stringify(marks)})`);
     await page.key("c");
     await page.waitFor("document.querySelectorAll('[data-egg-compare] [data-egg-compare-side] iframe').length === 2", { label: "compare" });
@@ -604,6 +846,42 @@ const steps = {
     console.log(JSON.stringify({ seenStates, workspace: final.worker?.workspace, roomThread: final.worker?.threadId, material }, null, 2));
   },
 
+  // ---- A room whose first line is work, and stopping its room thread: the planning step, the room thread, S and y, all through the signed path.
+  async workstop(page) {
+    if (!folder) return console.log("(skipped workstop: it makes a room, so it needs --folder: a git checkout, not a linked worktree)");
+    const text = "measure how long `sleep 45` takes to run";
+    await closeNewRoomForm(page);
+    await focusRoot(page);
+    await page.key("n");
+    await page.waitFor("!!document.querySelector('[data-egg-folder]')", { label: "the new-room form" });
+    await page.eval(`(() => { const el = document.querySelector('[data-egg-folder]'); el.focus(); el.select(); })()`);
+    await page.type(folder);
+    await page.eval("document.querySelector('[data-egg-first-line]').focus()");
+    await page.type(text);
+    await page.key("Enter");
+    await page.waitFor(subjectIs(text), { label: "the room opens" });
+    const roomId = await page.eval(`localStorage.getItem("egg:last-room")`);
+    roomIds.push(roomId);
+    const noteStarting = (start) => `([...document.querySelectorAll('[data-egg-line] .egg-line-text')].find((l) => l.textContent.startsWith(${JSON.stringify(start)}))?.textContent ?? null)`;
+    await page.waitFor(`${noteStarting("To the room thread")} || ${noteStarting("No room thread")} || document.querySelectorAll('[data-egg-cards] [data-egg-card]').length > 0`, { timeout: 90000, label: "the line is routed" });
+    check(!!(await page.eval(noteStarting("To the room thread"))), `the planning step routes the line to the room thread (${(await lines(page)).at(-1)?.slice(0, 160)})`);
+    await page.waitFor(`!!document.querySelector('[data-egg-worker]') || ${noteStarting("No room thread")}`, { timeout: 180000, label: "the status line" });
+    const none = await page.eval(noteStarting("No room thread"));
+    if (none) return check(false, `no room thread could start on ${folder}: ${none}`);
+    const room = (await rpc("room_get", { roomId })).room;
+    check(!!room.worker?.threadId, `a room thread started for it (${room.worker?.threadId}, in a ${room.worker?.kind})`);
+    await waitWatching(page, "document.querySelector('[data-egg-worker]')?.dataset.eggWorkerState === 'running'", 5 * 60_000, "the room thread running");
+    await focusRoot(page);
+    await page.key("S");
+    await page.waitFor("!!document.querySelector('[data-egg-confirm-stop]')", { label: "the stop confirmation" });
+    await page.key("y");
+    await page.waitFor(noteStarting("Stopped the room thread's turn"), { timeout: 90000, label: "the stop in the notebook" });
+    check(true, `S then y stops its turn, and the notebook says so ("${(await page.eval(noteStarting("Stopped the room thread's turn"))).slice(0, 80)}…")`);
+    check((await rpc("room_get", { roomId })).room.worker?.held === true, "egg holds it until the next work line");
+    check((await unsentLines(page)).length === 0, "nothing was refused on the way");
+    await collectThreads(roomId);
+  },
+
   // ---- The room list, and deleting the test rooms.
   async rooms(page) {
     if (!ctx.childRoomId || !roomIds.includes(ctx.parentRoomId)) return console.log("(skipped rooms: it deletes rooms this run made, so it needs new and zoom)");
@@ -646,12 +924,19 @@ const steps = {
 
 const chrome = await launchChrome(9358);
 try {
+  // A copy for checks starts with no key enrolled, so the test browser is the first to ask.
+  if (plugin !== "egg") {
+    const was = await resetEnrolment({ bb, plugin });
+    console.log(`(enrolment of ${plugin} reset with ${was.resetPath}: ${was.cleared} key(s) cleared)`);
+  }
   const page = await firstPage(chrome.port);
   await page.goto(pageUrl, 5000);
   if (reuse) await page.eval(`localStorage.setItem("egg:last-room", ${JSON.stringify(reuse)})`);
   else await page.eval(`localStorage.removeItem("egg:last-room")`);
   await page.goto(pageUrl, 5000);
   await page.waitFor("!!document.querySelector('[data-egg-root]')", { timeout: 60000, label: "the egg page" });
+  console.log("-- enrol");
+  await enrol(page);
   if (reuse) {
     await page.waitFor(`!!document.querySelector('[data-egg-subject]') && ${allSettled}`, { timeout: 60000, label: "the reused room with a finished round" });
     check(true, `reusing room ${reuse}`);
@@ -667,8 +952,9 @@ try {
   check(false, `stopped: ${e.message}`);
 } finally {
   await chrome.stop();
-  // Whatever happened, the rooms this run made go (their view threads are archived with them).
-  for (const id of roomIds) {
+  // Whatever happened, the rooms this run made go (their view threads are archived with them), unless they are kept.
+  if (keepRooms) console.log(`(kept for a later run: ${roomIds.map((id) => `--room ${id}`).join(", ") || "no room"})`);
+  for (const id of keepRooms ? [] : roomIds) {
     await collectThreads(id);
     try {
       const listed = (await rpc("rooms_list", null)).rooms.some((r) => r.id === id);
@@ -683,6 +969,6 @@ try {
   if (reuse) await collectThreads(reuse);
 }
 const secs = (t) => (t ? { planned: `${(t.planned / 1000).toFixed(1)} s`, total: `${(t.total / 1000).toFixed(1)} s` } : null);
-console.log(JSON.stringify({ sections: SECTIONS.filter((s) => wanted.has(s)), timings: Object.fromEntries(Object.entries(timings).map(([k, v]) => [k, secs(v)])), rooms: roomIds, reused: reuse ?? null, viewThreads: [...viewThreads] }, null, 2));
+console.log(JSON.stringify({ sections: ["enrol", ...SECTIONS.filter((s) => wanted.has(s))], probe: ctx.probe ?? null, timings: Object.fromEntries(Object.entries(timings).map(([k, v]) => [k, secs(v)])), rooms: roomIds, reused: reuse ?? null, viewThreads: [...viewThreads] }, null, 2));
 console.log(failed ? "e2e FAILED" : "e2e passed");
 process.exit(failed ? 1 : 0);

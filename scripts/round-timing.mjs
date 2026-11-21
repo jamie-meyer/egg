@@ -11,8 +11,15 @@
 // is deleted at the end (which archives its view threads) unless
 // --keep-room is given. Set the plugin's thread title prefix to something
 // recognisable first. Needs the `bb` CLI on PATH.
+//
+// The rounds are started with signed calls, by a key the script makes for
+// itself. On a copy with no key enrolled it is the first and is enrolled; on
+// one with a key, approve it on the copy's page (A, then y), or pass
+// --reset-enrolment to clear the copy's keys first (never the installed
+// egg's; that needs to run outside any command sandbox).
 import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { enrolledSigner } from "./signer.mjs";
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -39,11 +46,11 @@ const LINES = [
   "how is what a view was built from worked out",
 ];
 
+// egg acts only on signed calls (docs/security.md): the script signs with a key of its own.
+let signer = null;
 const rpc = async (method, input) => {
-  const res = await fetch(`${bb}/api/v1/plugins/${plugin}/rpc/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
-  const body = await res.json();
-  if (!res.ok || body.error) throw new Error(`${method}: ${JSON.stringify(body).slice(0, 300)}`);
-  return body.result;
+  signer ??= await enrolledSigner({ bb, plugin, reset: flag("reset-enrolment") });
+  return signer.call(method, input);
 };
 
 function events(threadId) {
