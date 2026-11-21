@@ -52,21 +52,47 @@ export const viewSidecarSchema = z.object({
 });
 export type ViewSidecar = z.infer<typeof viewSidecarSchema>;
 
-/** Lines of a .jsonl file that parse as `schema`; the rest are counted, not thrown. */
+/**
+ * A line that is not valid JSON only because of a backslash JSON does not
+ * know (`\p{L}`, `\X`, `\d` written into a string as they stand), with those
+ * backslashes doubled. Escapes JSON does know are left alone.
+ */
+export function repairEscapes(line: string): string {
+  return line.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})?/g, (all, known) => (known === undefined ? "\\\\" : all));
+}
+
+function parseLine(line: string): unknown {
+  try {
+    return JSON.parse(line);
+  } catch (e) {
+    const repaired = repairEscapes(line);
+    if (repaired === line) throw e;
+    return JSON.parse(repaired);
+  }
+}
+
+/**
+ * Lines of a .jsonl file that parse as `schema`; the rest are counted, not
+ * thrown. A line with a stray backslash is repaired and read. A last line
+ * with no newline after it that does not parse is still being written: it is
+ * not counted.
+ */
 export function parseJsonl<T>(content: string, schema: z.ZodType<T, unknown>): { items: T[]; bad: number } {
   const items: T[] = [];
   let bad = 0;
-  for (const raw of content.split("\n")) {
+  const raws = content.split("\n");
+  raws.forEach((raw, i) => {
     const line = raw.trim();
-    if (!line) continue;
+    if (!line) return;
+    const unfinished = i === raws.length - 1;
     try {
-      const parsed = schema.safeParse(JSON.parse(line));
+      const parsed = schema.safeParse(parseLine(line));
       if (parsed.success) items.push(parsed.data);
       else bad++;
     } catch {
-      bad++;
+      if (!unfinished) bad++;
     }
-  }
+  });
   return { items, bad };
 }
 

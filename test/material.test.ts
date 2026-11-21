@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { copyOut, excludeFromGit, ledgerEntrySchema, listFiles, mergeLedger, noteSchema, parseJsonl, restore, viewFileKind } from "../src/material.ts";
+import { copyOut, excludeFromGit, ledgerEntrySchema, listFiles, mergeLedger, noteSchema, parseJsonl, repairEscapes, restore, viewFileKind } from "../src/material.ts";
 import { builtFromLedger, ledgerLine, ranCommand } from "../src/provenance.ts";
 
 test("ledger lines: bad lines counted, a finishing line keeps what the starting line said", () => {
@@ -21,6 +21,22 @@ test("notes need text; long text is capped", () => {
   const { items, bad } = parseJsonl(`${JSON.stringify({ text: "x".repeat(2000) })}\n${JSON.stringify({ at: "now" })}\n`, noteSchema);
   assert.equal(bad, 1);
   assert.equal(items[0]!.text.length, 600);
+});
+
+test("a note with a stray backslash is read, not dropped", () => {
+  const stray = String.raw`{"text":"\p{Lu} and \X miss U+023A; C:\\dir and \"quoted\" and \u00e9 kept"}`;
+  assert.throws(() => JSON.parse(stray));
+  const { items, bad } = parseJsonl(`${stray}\n${JSON.stringify({ text: "plain" })}\n`, noteSchema);
+  assert.equal(bad, 0);
+  assert.equal(items[0]!.text, String.raw`\p{Lu} and \X miss U+023A; C:\dir and "quoted" and é kept`);
+  assert.equal(items[1]!.text, "plain");
+  const fine = JSON.stringify({ text: String.raw`a\b "c" \\d` });
+  assert.equal(repairEscapes(fine), fine);
+});
+
+test("a last line still being written is not counted as bad; a finished bad line is", () => {
+  assert.deepEqual(parseJsonl(`${JSON.stringify({ text: "a" })}\n{"text":"half`, noteSchema), { items: [{ at: "", text: "a" }], bad: 0 });
+  assert.equal(parseJsonl(`{"text":"half\n${JSON.stringify({ text: "a" })}\n`, noteSchema).bad, 1);
 });
 
 test("only plain page names are pages", () => {

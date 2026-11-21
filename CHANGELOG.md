@@ -24,6 +24,9 @@
   Notes become notebook lines, pages become cards in a round of their own,
   and `.egg/` is copied to the room's directory, so it outlives the clone;
   a fresh room thread gets it back.
+- **No note is dropped in silence.** A note or ledger line the room thread
+  writes with a stray backslash (`\p{L}`, `\X`) is repaired and read; a
+  line egg still cannot read is counted and said in the notebook.
 - **Views use it.** Once there is a room thread, views run in its
   workspace, read its ledger first and cite it. "Built from" lists the
   ledger entries a view rests on, each checked against what the room

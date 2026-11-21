@@ -470,14 +470,17 @@ export function createRoomThreads(deps: RoomThreadDeps) {
 
       // Notes.
       const notesFile = await readSmall(join(root, NOTES_FILE), MAX_JSONL_BYTES);
-      const notes = notesFile ? parseJsonl(notesFile.content, noteSchema).items : [];
+      const readNotes = notesFile ? parseJsonl(notesFile.content, noteSchema) : { items: [], bad: 0 };
+      const notes = readNotes.items;
       const seen = notes.length < worker.notesSeen ? 0 : worker.notesSeen;
       const fresh = notes.slice(seen);
 
       // The ledger: built from egg's run records; a ledger line with no record is only claimed.
       if (worker.ready) await installRunner(root).catch(() => undefined);
       const ledgerFile = await readSmall(join(root, LEDGER_FILE), MAX_JSONL_BYTES);
-      const lines = ledgerFile ? mergeLedger(parseJsonl(ledgerFile.content, ledgerEntrySchema).items) : [];
+      const readLedger = ledgerFile ? parseJsonl(ledgerFile.content, ledgerEntrySchema) : { items: [], bad: 0 };
+      const lines = mergeLedger(readLedger.items);
+      const unread: [string, number][] = [[NOTES_FILE, readNotes.bad], [LEDGER_FILE, readLedger.bad]];
       const records = await readRecords(root);
       const syncNow = clock();
       const before = await store.getLedger(roomId);
@@ -537,6 +540,7 @@ export function createRoomThreads(deps: RoomThreadDeps) {
 
       const viewIds: { id: string; content: string; format: "html" | "text" }[] = [];
       let runNews = false;
+      let unreadNews = false;
       await store.update(roomId, (r) => {
         const w = r.worker;
         if (!w || w.threadId !== worker.threadId) return;
@@ -568,6 +572,15 @@ export function createRoomThreads(deps: RoomThreadDeps) {
         if (fresh.length > shown.length) addLine(r, { kind: "note", text: `(${fresh.length - shown.length} earlier notes from the room thread are in ${MATERIAL_DIR}/${NOTES_FILE})` });
         for (const n of shown) addLine(r, { kind: "note", text: n.text });
         w.notesSeen = notes.length;
+        // Lines egg could not read are said, once per count, never dropped in silence.
+        for (const [name, bad] of unread) {
+          const key = `(unread ${name})`;
+          if (bad > (w.skippedSeen[key] ?? 0)) {
+            addLine(r, { kind: "trouble", text: `${bad} ${bad === 1 ? "line" : "lines"} in ${MATERIAL_DIR}/${name} could not be read (not valid JSON, or a field is missing) and ${bad === 1 ? "is" : "are"} not shown` });
+            unreadNews = true;
+          }
+          if (bad !== (w.skippedSeen[key] ?? 0)) w.skippedSeen[key] = bad;
+        }
         if (pages.length) {
           const { views } = startWorkRound(r, pages, now);
           views.forEach((v, i) => viewIds.push({ id: v.id, content: pages[i]!.content, format: pages[i]!.format }));
@@ -590,7 +603,7 @@ export function createRoomThreads(deps: RoomThreadDeps) {
         if (copy) w.syncedAt = now;
       });
       for (const v of viewIds) await store.putContent(v.id, { format: v.format, content: v.content });
-      if (fresh.length || pages.length || tooBig.length || copy?.skipped.length || runNews) publish(roomId);
+      if (fresh.length || pages.length || tooBig.length || copy?.skipped.length || runNews || unreadNews) publish(roomId);
     } catch (e) {
       log.warn(`sync ${roomId}: ${errText(e)}`);
     } finally {
