@@ -52,6 +52,19 @@ test("a settled view thread fills its card from what it wrote and what its event
   assert.equal((await env.store.get(room.id))!.lines.filter((l) => /"A" landed/.test(l.text)).length, 1);
 });
 
+test("a thread that only carries a view's mark does not settle the view", async () => {
+  const env = setup();
+  const room = await roomWithRound(env);
+  const view = roundViews(room, room.rounds[0]!)[0]!;
+  // Another thread, marked as if it were that view's, goes idle while the real one still runs.
+  env.meta.set("thr_impostor", { roomId: room.id, roundId: view.roundId, viewId: view.id, role: "view" });
+  await env.engine.onThreadSettled("thr_impostor", null);
+  await env.engine.onThreadSettled("thr_impostor", "it failed");
+  const after = (await env.store.get(room.id))!;
+  assert.equal(after.views[view.id]!.status, "running");
+  assert.ok(!env.calls.some((c) => c.method === "stop" && c.args.threadId === view.threadId));
+});
+
 test("a plain-text view is read from view.txt; a thread that wrote nothing fails in plain words", async () => {
   const env = setup({ writes: (id) => (id === "thr_2" ? { name: "view.txt", content: "just text" } : null) });
   const room = await roomWithRound(env);

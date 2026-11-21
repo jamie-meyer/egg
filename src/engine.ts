@@ -560,6 +560,9 @@ export function createEngine(deps: EngineDeps) {
       return;
     }
     if (!mark || mark.role !== "view" || !mark.viewId) return;
+    // Only the thread egg started for that view settles it: a thread that merely carries the view's mark does not.
+    const room = await store.get(mark.roomId);
+    if (room?.views[mark.viewId]?.threadId !== threadId) return;
     await finishView(mark.roomId, mark.viewId, failure);
   }
 
