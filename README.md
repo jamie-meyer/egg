@@ -264,6 +264,29 @@ In the new-room form the folder defaults to the folder of the last room
 made; below it is a list of bb's project checkouts, which Up and Down (or
 Ctrl-n, Ctrl-p) pick from.
 
+## Only you
+
+bb serves a plugin's methods to any local process, a sandboxed agent thread
+included, and does not say who is calling. A line in a room starts threads
+that build and run things, so egg acts only on calls **signed by your
+browser**. The page holds a signing key that cannot be exported and signs
+every call it makes: lines, new rooms, keeps, deletes, stopping the room
+thread, and reading rooms too. The backend refuses anything else.
+
+You do nothing for this, once: the first browser to open egg is enrolled,
+silently. Open the page yourself after installing or updating, before agents
+run. Another browser (bb's web page as well as the desktop app) shows one
+line with its key and what to do: on a page where egg already works, `A`
+then `y` approves it and `X` refuses it. If egg works in no browser of
+yours, the page prints a `touch` command for your own terminal that resets
+enrolment.
+
+[docs/security.md](docs/security.md) has the rest: exactly what a signature
+covers, every method that is not signed and what it exposes, and what
+signing cannot protect (your browser profile's files, a thread in `full`
+permission mode, `bb thread tell`, egg's settings, which a thread can
+change).
+
 ## What it stores, and where
 
 - **Rooms** (their lines, rounds, views and what each view was built from)
@@ -279,6 +302,9 @@ Ctrl-n, Ctrl-p) pick from.
   axis, the model, the time, its parent views, and the "built from" list. Undoing a keep removes both files, and
   so does dropping a view that was kept.
   Dropping a view takes it off the table, not out of the notebook.
+- **Keys.** egg's plugin storage also holds the public half of each enrolled
+  browser's signing key. The private half stays in that browser's own
+  storage (IndexedDB) and cannot be exported from it.
 
 ## What it sends to model providers
 
@@ -348,6 +374,10 @@ directory, the hold-to-talk key (Space, backquote, or off), *send a pasted
 line at once*, and the prefix of thread titles. Nothing assumes one model:
 some machines cannot use the top one.
 
+Settings are bb's, and changing one is not signed: any thread can run
+`bb plugin config egg set …`, the permission modes and *Where the room
+thread works* included. See [docs/security.md](docs/security.md).
+
 ## Development
 
 Checks never touch the egg you use. Make a copy under its own plugin id,
@@ -368,19 +398,41 @@ plugin id `egg`: installing that would replace the egg you use.
 `scripts/e2e.mjs` and `scripts/round-timing.mjs` refuse the plugin id `egg`
 unless given a long, explicit flag.
 
+egg acts only on signed calls, so the scripts sign theirs. Each pass of
+`scripts/e2e.mjs` starts by resetting the copy's enrolment with its reset
+file (never the installed egg's); the test browser opens the page and is
+enrolled as the first to ask, and the script's own key
+(`scripts/signer.mjs`) asks next and is approved by `A`, `y` on the page.
+That needs to run outside any command sandbox: the reset file is under bb's
+data directory.
+
 ```sh
 npm test                     # unit tests
 npm run typecheck
 node scripts/sandbox-check.mjs   # needs Chrome
 node scripts/e2e.mjs --folder <absolute folder> [--plugin egg-check]   # needs Chrome and a running bb
 node scripts/e2e.mjs --room <room id> --only large,compare,timing   # a few sections on an existing room
-node scripts/round-timing.mjs --folder <absolute folder> [--rounds 2] [--plugin <id>]   # where a round's time goes
+node scripts/e2e.mjs --room <room id> --only probe   # every signed action tried without your key: each refused, nothing changed
+node scripts/round-timing.mjs --folder <absolute folder> [--rounds 2] [--plugin <id>] [--reset-enrolment]   # where a round's time goes
 node scripts/route-check.ts --project <id> --environment <id>   # how the real planning model routes test/route-cases.ts (2 threads)
 ```
 
-The whole end-to-end pass starts about 32 agent threads (the `work`
+The whole end-to-end pass starts about 34 agent threads (the `work`
 section alone about 9, and it runs for up to 50 minutes); the sections and what
-each costs are listed at the top of `scripts/e2e.mjs`.
+each costs are listed at the top of `scripts/e2e.mjs`. The `enrol` step and
+the `signing` and `probe` sections start none.
+
+To run the probe from where an agent stands, start the harness outside any
+sandbox and the attempts inside one, on the same directory:
+
+```sh
+node scripts/e2e.mjs --room <room id> --only probe --probe-dir <dir>      # outside: signs the material, checks nothing changed
+node scripts/probe.mjs --plugin egg-check --dir <dir> --sandboxed         # inside an agent's sandbox: the attempts
+```
+
+`--sandboxed` also tries to create the reset file, open bb's database and
+change a setting; outside a sandbox the first of those resets the copy's
+enrolment, so pass it only inside one.
 
 ## Licence
 

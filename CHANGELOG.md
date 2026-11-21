@@ -2,6 +2,19 @@
 
 ## 0.2.0
 
+- **Only you.** bb serves a plugin's methods to any local process, a
+  sandboxed agent thread included, and does not say who is calling. egg now
+  acts only on calls signed by your browser: the page holds a signing key
+  that cannot be exported and signs every call (lines, new rooms, keeps,
+  deletes, stopping the room thread, and reads). The methods of the
+  interface are gone; there is one, `signed`. The first browser to open egg
+  is enrolled silently; another shows a line with its key, and `A` then `y`
+  on an enrolled page approves it. A reset file under bb's data directory
+  clears enrolment. [docs/security.md](docs/security.md) says what a
+  signature covers, what is not signed, and what signing cannot protect.
+  `scripts/probe.mjs` tries every action without the key.
+- **A view is settled only by its own thread.** A thread that merely
+  carries a view's mark no longer ends that view.
 - **Open egg from anywhere.** Control+Option+E opens egg's page from any
   screen in bb, and "egg: open its page" is in bb's command palette. The
   shortcut can be rebound in bb's keyboard settings.
