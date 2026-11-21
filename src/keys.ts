@@ -34,7 +34,10 @@ export type Command =
   /** S: stop the room thread's turn (y confirms). */
   | { kind: "stop" }
   /** Escape on the table: closes the chat pane when it is open. */
-  | { kind: "escape" };
+  | { kind: "escape" }
+  /** A, X while another browser asks to be enrolled: approve it, refuse it. */
+  | { kind: "approve-key" }
+  | { kind: "refuse-key" };
 
 export interface KeyLike {
   key: string;
@@ -44,10 +47,12 @@ export interface KeyLike {
 }
 
 /** What a key press asks for in a mode, or null when the page leaves it alone. */
-export function commandFor(event: KeyLike, mode: Mode, context: { chatOpen?: boolean } = {}): Command | null {
+export function commandFor(event: KeyLike, mode: Mode, context: { chatOpen?: boolean; keyRequest?: boolean } = {}): Command | null {
   if (event.ctrlKey || event.metaKey || event.altKey) return null;
   const k = event.key;
   if (mode === "legend") return k === "Escape" || k === "?" || k === "q" ? { kind: "close" } : null;
+  // While another browser asks to be enrolled, A and X answer it, whatever is on screen.
+  if (context.keyRequest && (k === "A" || k === "X")) return { kind: k === "A" ? "approve-key" : "refuse-key" };
   if (mode === "rooms") {
     switch (k) {
       case "j":
@@ -152,7 +157,8 @@ export function commandFor(event: KeyLike, mode: Mode, context: { chatOpen?: boo
 
 /**
  * After S, the next key decides: y stops the room thread's turn, any other
- * key (Escape included) leaves it running.
+ * key (Escape included) leaves it running. The same rule confirms A, which
+ * approves a browser that asks to be enrolled: "stop" there means yes.
  */
 export function confirmStop(event: KeyLike): "stop" | "cancel" | "ignore" {
   if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)) return "ignore";
@@ -334,6 +340,13 @@ export const LEGEND: readonly { title: string; keys: readonly [string, string][]
       ["D", "in the list: delete the room (kept files stay); u undoes"],
       ["n", "a new room: a folder and a first line"],
       ["?", "this legend"],
+    ],
+  },
+  {
+    title: "Another browser (only while one asks)",
+    keys: [
+      ["A", "approve the browser that asks to use egg as you, once it shows the same key; y confirms, any other key leaves it waiting"],
+      ["X", "refuse it"],
     ],
   },
 ];

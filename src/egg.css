@@ -244,6 +244,18 @@
 .egg-checkouts li.egg-selected { background: var(--egg-bg2); box-shadow: inset 2px 0 0 var(--egg-accent); }
 .egg-compare-side .egg-frame-large { height: auto; }
 
+/* Signing: why this browser can do nothing here, or another browser asking to be enrolled. Plain lines under the top bar. */
+.egg-signing {
+  margin: 0;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--egg-rule);
+  background: var(--egg-bg2);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 /* The room thread: one status line under the top bar, and its chat in a pane beside the table. */
 .egg-worker {
   display: flex;

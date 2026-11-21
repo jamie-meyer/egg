@@ -1,98 +1,21 @@
 // egg's backend: rooms in plugin storage, rounds of view threads, and the
 // kept views written as plain files. The page talks to it over RPC and
 // hears about changes on the "room-changed" realtime channel.
+//
+// bb serves a plugin's RPC to any local process, so nothing here is a method
+// of its own: everything below is reached only through `signed`, with a
+// signature from a browser enrolled with egg. See src/signing/ and
+// docs/security.md.
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { z } from "zod";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { type EngineSettings, type PermissionMode, createEngine } from "./src/engine.ts";
 import { DEFAULT_ROOMS_DIR, DEFAULT_TITLE_PREFIX } from "./src/identity.ts";
 import { expandHome } from "./src/kept.ts";
-import { ledgerRecordSchema, roomSchema, roomSummarySchema, summarize, workspaceKindSchema } from "./src/model.ts";
+import { summarize } from "./src/model.ts";
+import { registerSigning } from "./src/signing/backend.ts";
 import { workspaceSetting } from "./src/workspace.ts";
 import { createStore } from "./src/store.ts";
-
-const id = z.string().min(1).max(100);
-const lineText = z.string().trim().min(1).max(4000);
-const source = z.enum(["typed", "voice", "pasted"]);
-
-export const rpcContract = defineRpcContract({
-  /**
-   * Where a new room reads by default: the folder of the last room made,
-   * else the current project's checkout; and every bb project's checkouts
-   * to pick from.
-   */
-  defaults: {
-    input: z.object({ projectId: z.string().max(100).nullable() }),
-    output: z.object({
-      folder: z.string().nullable(),
-      hostId: z.string().nullable(),
-      projectId: z.string().nullable(),
-      roomsDir: z.string(),
-      checkouts: z.array(z.object({ projectId: z.string(), name: z.string(), path: z.string() })),
-    }),
-  },
-  rooms_list: { input: z.null(), output: z.object({ rooms: z.array(roomSummarySchema) }) },
-  room_create: {
-    input: z.object({ folder: z.string().trim().min(1).max(2000), line: lineText, projectId: z.string().max(100).nullable(), source }),
-    output: z.object({ room: roomSchema }),
-  },
-  room_get: { input: z.object({ roomId: id }), output: z.object({ room: roomSchema.nullable() }) },
-  /** A line from the person: starts a round (the planning step routes it to views, the room thread, or both). */
-  say: { input: z.object({ roomId: id, text: lineText, source }), output: z.object({ roundId: z.string() }) },
-  /** w: a line straight to the room thread, with no planning step. */
-  work: { input: z.object({ roomId: id, text: lineText, source }), output: z.object({ lineId: z.string() }) },
-  /** The room thread's status line, read from bb now; null when the room has none. */
-  worker_status: {
-    input: z.object({ roomId: id }),
-    output: z
-      .object({
-        threadId: z.string(),
-        state: z.enum(["starting", "running", "waiting on you", "failed", "idle", "gone"]),
-        since: z.number(),
-        step: z.string(),
-        quietMs: z.number().nullable(),
-        tokens: z.number().nullable(),
-        workspace: z.string(),
-        kind: workspaceKindSchema,
-        ready: z.boolean(),
-        ledger: z.number(),
-        /** Runs whose process egg sees alive, and how long the oldest has run. */
-        runsOpen: z.number(),
-        longestOpenMs: z.number().nullable(),
-        /** Ledger lines with no run record. */
-        claimed: z.number(),
-      })
-      .nullable(),
-  },
-  /** The room's runs as egg last synced them: each with the state egg owns. */
-  ledger: { input: z.object({ roomId: id }), output: z.object({ entries: z.array(ledgerRecordSchema) }) },
-  /** S then y: stop the room thread's turn. */
-  worker_stop: { input: z.object({ roomId: id }), output: z.object({ stopped: z.boolean() }) },
-  /** m: four variations of a view along different axes. */
-  more: { input: z.object({ roomId: id, viewId: id }), output: z.object({ roundId: z.string() }) },
-  /** x: cross two views (A first). */
-  cross: { input: z.object({ roomId: id, a: id, b: id }), output: z.object({ roundId: z.string() }) },
-  /** z: a child room about one part of a view; its first round starts at once. */
-  zoom: { input: z.object({ roomId: id, viewId: id, part: lineText, source }), output: z.object({ room: roomSchema }) },
-  /** p: pin a view as context, or with null unpin. */
-  pin: { input: z.object({ roomId: id, viewId: id.nullable() }), output: z.object({ room: roomSchema }) },
-  /** D in the room list: take a room out of egg (kept files stay on disk). */
-  room_delete: { input: z.object({ roomId: id }), output: z.object({ deleted: z.boolean() }) },
-  /** u in the room list: put a deleted room back. */
-  room_restore: { input: z.object({ roomId: id }), output: z.object({ restored: z.boolean() }) },
-  /** Something the page needs on the notebook, such as a failed transcription. */
-  note: { input: z.object({ roomId: id, text: lineText }), output: z.null() },
-  view_content: {
-    input: z.object({ roomId: id, viewId: id }),
-    output: z.object({ format: z.enum(["html", "text"]), content: z.string() }).nullable(),
-  },
-  /** Keep, drop, or with null undo either. */
-  decide: {
-    input: z.object({ roomId: id, viewId: id, decision: z.enum(["kept", "dropped"]).nullable() }),
-    output: z.object({ room: roomSchema }),
-  },
-});
 
 export const ROOM_CHANGED = "room-changed";
 /** How often the room thread's material is synced while it works. */
@@ -332,7 +255,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  bb.rpc.register(rpcContract, {
+  // What egg does for the person. Each runs only for a verified signature: see registerSigning.
+  registerSigning(bb, {
     defaults: async ({ projectId: given }) => {
       const last = await store.lastFolder();
       const projectId = given ?? last?.projectId ?? (await recentProjectId());

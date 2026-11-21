@@ -150,3 +150,17 @@ test("room thread keys: w, t, S; Escape on the table only while its chat is open
   const keys = LEGEND.flatMap((g) => g.keys.map(([k]) => k));
   for (const k of ["w", "t", "S", "i", "y", "d", "m", "x", "z", "p", "r", "n"]) assert.ok(keys.some((x) => x.split(" ").includes(k)), k);
 });
+
+test("A and X approve and refuse a browser that asks, and mean nothing otherwise", () => {
+  assert.deepEqual(commandFor({ key: "A" }, "table", { keyRequest: true }), { kind: "approve-key" });
+  assert.deepEqual(commandFor({ key: "X" }, "table", { keyRequest: true }), { kind: "refuse-key" });
+  assert.deepEqual(commandFor({ key: "A" }, "large", { keyRequest: true }), { kind: "approve-key" });
+  assert.equal(commandFor({ key: "A" }, "table"), null);
+  assert.equal(commandFor({ key: "X" }, "table", { keyRequest: false }), null);
+  // The lower-case keys keep their meaning while a browser asks.
+  assert.deepEqual(commandFor({ key: "a" }, "table", { keyRequest: true }), { kind: "input" });
+  assert.deepEqual(commandFor({ key: "x" }, "table", { keyRequest: true }), { kind: "cross" });
+  assert.deepEqual(commandFor({ key: "A" }, "rooms", { keyRequest: true }), { kind: "approve-key" });
+  assert.deepEqual(commandFor({ key: "X" }, "compare", { keyRequest: true }), { kind: "refuse-key" });
+  assert.equal(commandFor({ key: "A" }, "legend", { keyRequest: true }), null);
+});

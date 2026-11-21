@@ -2,16 +2,17 @@
 // right, rooms and the legend over them. Everything is reachable from the
 // keyboard; see LEGEND in keys.ts.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ThreadChat, useBbContext, useRealtime, useRpc, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
-import type { rpcContract } from "../server.ts";
+import { ThreadChat, useBbContext, useRealtime, useSdk, useSettings } from "@get-bb/plugin-sdk/app";
 import { type Mode, type Selection, LEGEND, asLine, clampSelection, commandFor, confirmStop, holdKeyCode, isEditable, liveMarks, moveOnTable, pasteAction, pickAt, selectionFor, tableRows, toggleMark } from "./keys.ts";
 import { type BuiltFrom, type Line, type ParentRef, type Room, type RoomSummary, type Round, type View, keptViews, roomTree, roundViews } from "./model.ts";
 import { builtFromCount } from "./provenance.ts";
 import { PLAIN_THEME, VIEW_SANDBOX, type ViewTheme, viewDocument } from "./sandbox.ts";
+import { type Call, SigningRefusal, useSigner } from "./signing/page.ts";
 import { type WorkerStatus, duration, statusLine } from "./status.ts";
 import { type VoiceState, clipFile, createHoldToTalk, mediaRecorder } from "./voice.ts";
 
-type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
+/** Every call the page makes for the person goes through its signer: see src/signing/page.ts. */
+type Rpc = { call: Call };
 type Content = { format: "html" | "text"; content: string };
 type WorkerInfo = WorkerStatus & { threadId: string; workspace: string; kind: "clone" | "worktree" | "in-place"; ready: boolean; ledger: number; runsOpen: number; longestOpenMs: number | null; claimed: number };
 
@@ -201,11 +202,11 @@ function Card(props: {
   );
 }
 
-function Notebook({ lines, children }: { lines: readonly Line[]; children: React.ReactNode }) {
+function Notebook({ lines, unsent, children }: { lines: readonly Line[]; unsent: readonly string[]; children: React.ReactNode }) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
-  }, [lines.length]);
+  }, [lines.length, unsent.length]);
   return (
     <div className="egg-notebook" data-egg-notebook="">
       <ol className="egg-lines">
@@ -213,6 +214,13 @@ function Notebook({ lines, children }: { lines: readonly Line[]; children: React
           <li key={line.id} className={`egg-line egg-line-${line.kind}`} data-egg-line={line.kind}>
             <span className="egg-line-mark">{line.kind === "said" ? (line.source === "voice" ? "◉" : line.route === "work" ? "⚒" : "›") : line.kind === "trouble" ? "!" : line.kind === "note" ? "◆" : "·"}</span>
             <span className="egg-line-text" data-egg-route={line.route ?? undefined}>{line.text}</span>
+          </li>
+        ))}
+        {/* What this page could not do for a reason of signing. The page's own lines: they are not stored. */}
+        {unsent.map((text, i) => (
+          <li key={`unsent-${i}`} className="egg-line egg-line-trouble" data-egg-line="trouble" data-egg-unsent="">
+            <span className="egg-line-mark">!</span>
+            <span className="egg-line-text">{text}</span>
           </li>
         ))}
       </ol>
@@ -257,7 +265,8 @@ function LineInput(props: { initial: string; placeholder?: string; mark?: string
   );
 }
 
-function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: string; onMade: (room: Room) => void; onCancel: () => void }) {
+function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: string; onMade: (room: Room) => void; onCancel: () => void; onFailed: (what: string, e: unknown) => void }) {
+  const notMade = "The room was not made";
   const [folder, setFolder] = useState("");
   const [project, setProject] = useState<string | null>(props.projectId);
   const [line, setLine] = useState(props.initialLine);
@@ -286,7 +295,9 @@ function NewRoomForm(props: { rpc: Rpc; projectId: string | null; initialLine: s
       const { room } = await props.rpc.call("room_create", { folder: folder.trim(), line: text, projectId: project, source: "typed" });
       props.onMade(room);
     } catch (e) {
-      setError(errText(e));
+      // Said here, and in the notebook when it is a refusal for a reason of signing: the form goes, the line stays.
+      setError(e instanceof SigningRefusal ? e.inWords(notMade) : errText(e));
+      if (e instanceof SigningRefusal) props.onFailed(notMade, e);
       setBusy(false);
     }
   };
@@ -399,7 +410,10 @@ function Legend() {
 }
 
 export function EggPage() {
-  const rpc = useRpc<typeof rpcContract>();
+  const signer = useSigner();
+  const rpc = useMemo<Rpc>(() => ({ call: signer.call }), [signer.call]);
+  const enrolled = signer.status === "enrolled";
+  const keyRequest = signer.requests[0] ?? null;
   const sdk = useSdk();
   const { projectId } = useBbContext();
   const { values: settings } = useSettings();
@@ -415,6 +429,8 @@ export function EggPage() {
   const [chatOpen, setChatOpen] = useState(false);
   const [focusRequest, setFocusRequest] = useState(0);
   const [confirming, setConfirming] = useState(false);
+  /** After A: the key waiting for y before it is approved. */
+  const [approving, setApproving] = useState<string | null>(null);
   const chatMayFocus = useRef(false);
   const [marks, setMarks] = useState<string[]>([]);
   /** After going up (-): the view to land on once the parent room is open. */
@@ -428,6 +444,8 @@ export function EggPage() {
   const [contents, setContents] = useState<Record<string, Content>>({});
   const [voice, setVoice] = useState<VoiceState>("idle");
   const [hint, setHint] = useState<string | null>(null);
+  /** What was not done for a reason of signing, said in the notebook. */
+  const [unsent, setUnsent] = useState<string[]>([]);
   const [roomsDir, setRoomsDir] = useState<string>("");
   const [theme, setTheme] = useState<ViewTheme>(PLAIN_THEME);
   const [cols, setCols] = useState(2);
@@ -448,7 +466,7 @@ export function EggPage() {
   const undo = useRef<{ roomId: string; viewId: string; before: View["decision"] }[]>([]);
 
   const loadRooms = useCallback(() => {
-    rpc.call("rooms_list").then((r) => setRooms(r.rooms), () => undefined);
+    rpc.call("rooms_list", null).then((r) => setRooms(r.rooms), () => undefined);
   }, [rpc]);
   const loadRoom = useCallback(
     (id: string) => {
@@ -466,19 +484,32 @@ export function EggPage() {
     [rpc],
   );
 
+  // Everything is read again when this browser becomes enrolled: until then it is shown nothing.
   useEffect(() => {
     loadRooms();
     rpc.call("defaults", { projectId }).then((d) => setRoomsDir(d.roomsDir), () => undefined);
-  }, [loadRooms, rpc, projectId]);
+    if (enrolled) setUnsent([]);
+  }, [loadRooms, rpc, projectId, enrolled]);
   useEffect(() => {
     if (roomId) {
       localStorage.setItem(LAST_ROOM, roomId);
       loadRoom(roomId);
     } else setRoom(null);
-  }, [roomId, loadRoom]);
+  }, [roomId, loadRoom, enrolled]);
   useEffect(() => {
-    if (!roomId && rooms.length === 0 && !creating) setCreating({ line: "" });
-  }, [roomId, rooms.length]);
+    if (enrolled && !roomId && rooms.length === 0 && !creating) setCreating({ line: "" });
+  }, [roomId, rooms.length, enrolled]);
+  // A browser that is not enrolled, or no longer is, shows nothing: what it had read goes off the page.
+  const shut = signer.status === "pending" || signer.status === "refused" || signer.status === "unavailable";
+  useEffect(() => {
+    if (!shut) return;
+    setRoom(null);
+    setRooms([]);
+    setContents({});
+    setWorker(null);
+    setChatOpen(false);
+    setMode("table");
+  }, [shut]);
   useRealtime("room-changed", (payload) => {
     const changed = (payload as { roomId?: unknown })?.roomId;
     loadRooms();
@@ -598,6 +629,17 @@ export function EggPage() {
     setHint(text);
     setTimeout(() => setHint((h) => (h === text ? null : h)), 3000);
   };
+  /**
+   * Something the person asked for failed. A refusal for a reason of signing
+   * is said in the notebook, in full, and stays there; anything else is a
+   * hint at the top, as before.
+   */
+  const failed = (what: string, e: unknown, otherwise?: string) => {
+    if (e instanceof SigningRefusal) {
+      const text = e.inWords(what);
+      setUnsent((all) => (all.at(-1) === text ? all : [...all.slice(-19), text]));
+    } else flash(otherwise ?? errText(e));
+  };
 
   const send = useCallback(
     async (text: string, source: "typed" | "voice" | "pasted") => {
@@ -608,7 +650,7 @@ export function EggPage() {
       try {
         await rpc.call("say", { roomId: room.id, text, source });
       } catch (e) {
-        flash(`Could not send: ${errText(e)}`);
+        failed(`Not sent ("${text.slice(0, 80)}")`, e, `Could not send: ${errText(e)}`);
       }
     },
     [room, rpc],
@@ -623,7 +665,7 @@ export function EggPage() {
       const res = await rpc.call("decide", { roomId: room.id, viewId: view.id, decision });
       setRoom(res.room);
     } catch (e) {
-      flash(errText(e));
+      failed(decision === "kept" ? "Not kept" : decision === "dropped" ? "Not dropped" : "Not undone", e);
       loadRoom(room.id);
     }
   };
@@ -653,7 +695,9 @@ export function EggPage() {
 
   // Keys and paste. Only when focus is on this page (or nowhere), never in a text field.
   const tree = useMemo(() => roomTree(rooms), [rooms]);
-  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings, marks, tree, chatOpen, confirming, worker };
+  const state = { mode, creating, input, room, cards, kept, current, selected, rowLengths, at, cols, rounds, shownIndex, rooms, roomSel, holdKey, settings, marks, tree, chatOpen, confirming, worker, keyRequest, approving };
+  const failedRef = useRef(failed);
+  failedRef.current = failed;
   const live = useRef(state);
   live.current = state;
   useEffect(() => {
@@ -673,6 +717,22 @@ export function EggPage() {
         return;
       }
       if (!ours() || isEditable(document.activeElement as HTMLElement | null) || s.creating || s.input) return;
+      if (s.approving) {
+        // Approving a key lets that browser do everything here as the person: it takes y, as stopping does.
+        const answer = confirmStop(e);
+        if (answer === "ignore") return;
+        e.preventDefault();
+        e.stopPropagation();
+        const fingerprint = s.approving;
+        setApproving(null);
+        if (answer === "stop") {
+          rpc.call("key_approve", { fingerprint }).then(
+            () => flash(`Approved ${fingerprint}: that browser can now use egg as you.`),
+            (err) => failedRef.current("That browser was not approved", err),
+          );
+        } else flash(`Not approved: ${fingerprint} still waits.`);
+        return;
+      }
       if (s.confirming) {
         const answer = confirmStop(e);
         if (answer === "ignore") return;
@@ -682,7 +742,7 @@ export function EggPage() {
         if (answer === "stop" && s.room) {
           rpc.call("worker_stop", { roomId: s.room.id }).then(
             (r) => flash(r.stopped ? "Stopped the room thread's turn." : "There was nothing to stop."),
-            (err) => flash(`Could not stop: ${errText(err)}`),
+            (err) => failedRef.current("The room thread was not stopped", err, `Could not stop: ${errText(err)}`),
           );
         } else flash("Left the room thread running.");
         return;
@@ -693,7 +753,7 @@ export function EggPage() {
         if (!e.repeat) void talk.press();
         return;
       }
-      const command = commandFor(e, s.mode, { chatOpen: s.chatOpen });
+      const command = commandFor(e, s.mode, { chatOpen: s.chatOpen, keyRequest: s.keyRequest !== null });
       if (!command) return;
       e.preventDefault();
       e.stopPropagation();
@@ -782,7 +842,7 @@ export function EggPage() {
               if (!r.restored) flash("That room could not be put back.");
               loadRooms();
             },
-            (e) => flash(errText(e)),
+            (e) => failed("The room was not put back", e),
           );
           return;
         }
@@ -853,7 +913,7 @@ export function EggPage() {
         rpc.call("room_delete", { roomId: target.id }).then(
           () => loadRooms(),
           (e) => {
-            flash(errText(e));
+            failed(`"${target.subject.slice(0, 40)}" was not deleted`, e);
             loadRooms();
           },
         );
@@ -865,7 +925,7 @@ export function EggPage() {
         if (!s.room || !v) return;
         if (v.status !== "done") return flash("That view is not ready yet.");
         setMode("table");
-        rpc.call("more", { roomId: s.room.id, viewId: v.id }).catch((e) => flash(errText(e)));
+        rpc.call("more", { roomId: s.room.id, viewId: v.id }).catch((e) => failed("No variations were started", e));
         return;
       }
       case "mark": {
@@ -886,7 +946,7 @@ export function EggPage() {
         if (!s.room || live.length < 2) return flash("Mark two views with v first.");
         setMode("table");
         setMarks([]);
-        rpc.call("cross", { roomId: s.room.id, a: live[0]!, b: live[1]! }).catch((e) => flash(errText(e)));
+        rpc.call("cross", { roomId: s.room.id, a: live[0]!, b: live[1]! }).catch((e) => failed("The cross was not started", e));
         return;
       }
       case "zoom": {
@@ -913,7 +973,20 @@ export function EggPage() {
         if (!unpin && v.status !== "done") return flash("Only a finished view can be pinned.");
         rpc.call("pin", { roomId: s.room.id, viewId: unpin ? null : v.id }).then(
           (r) => setRoom((cur) => (cur && cur.id === r.room.id ? r.room : cur)),
-          (e) => flash(errText(e)),
+          (e) => failed(unpin ? "Not unpinned" : "Not pinned", e),
+        );
+        return;
+      }
+      case "approve-key":
+        // Not yet: the next key decides (y approves).
+        if (s.keyRequest) setApproving(s.keyRequest.fingerprint);
+        return;
+      case "refuse-key": {
+        const asking = s.keyRequest;
+        if (!asking) return;
+        rpc.call("key_refuse", { fingerprint: asking.fingerprint }).then(
+          () => flash(`Refused ${asking.fingerprint}.`),
+          (e) => failed("That browser was not refused", e),
         );
         return;
       }
@@ -977,9 +1050,24 @@ export function EggPage() {
         </span>
       </header>
 
+      {signer.status !== "enrolled" && signer.status !== "loading" ? (
+        <p className="egg-signing egg-trouble" data-egg-signing={signer.status} data-egg-own-key={signer.fingerprint ?? ""}>
+          {signer.why}
+        </p>
+      ) : null}
+      {approving ? (
+        <p className="egg-signing egg-trouble" data-egg-confirm-approve={approving}>
+          Approve key <b>{approving}</b>? Whatever holds it can then do everything in egg as you. <kbd>y</kbd> approves, any other key leaves it waiting.
+        </p>
+      ) : keyRequest ? (
+        <p className="egg-signing" data-egg-key-request={keyRequest.fingerprint}>
+          Another browser asks to use egg as you: key <b>{keyRequest.fingerprint}</b> ({keyRequest.label}, by its own word). Only if you have just opened egg in another browser and it shows this same key: <kbd>A</kbd>, then <kbd>y</kbd>, approves it. Otherwise <kbd>X</kbd> refuses it.
+          {signer.requests.length > 1 ? ` ${signer.requests.length - 1} more after it.` : ""}
+        </p>
+      ) : null}
       {room && worker ? <WorkerBar info={worker} now={Date.now()} chatOpen={chatOpen} confirming={confirming} /> : null}
       <div className={chatOpen && worker ? "egg-main egg-with-chat" : "egg-main"}>
-        <Notebook lines={room?.lines ?? []}>
+        <Notebook lines={room?.lines ?? []} unsent={unsent}>
           {input && room ? (
             <LineInput
               key={input.key}
@@ -997,10 +1085,10 @@ export function EggPage() {
                       setRoomId(r.room.id);
                       loadRooms();
                     },
-                    (e) => flash(`Could not zoom: ${errText(e)}`),
+                    (e) => failed(`No child room was made ("${text.slice(0, 80)}")`, e, `Could not zoom: ${errText(e)}`),
                   );
                 } else if (input.work) {
-                  rpc.call("work", { roomId: room.id, text, source: input.source }).catch((e) => flash(`Could not send: ${errText(e)}`));
+                  rpc.call("work", { roomId: room.id, text, source: input.source }).catch((e) => failed(`Not sent to the room thread ("${text.slice(0, 80)}")`, e, `Could not send: ${errText(e)}`));
                 } else void send(text, input.source);
               }}
               onLeave={() => {
@@ -1189,6 +1277,7 @@ export function EggPage() {
           rpc={rpc}
           projectId={projectId}
           initialLine={creating.line}
+          onFailed={failed}
           onMade={(made) => {
             setCreating(null);
             setRoom(made);
