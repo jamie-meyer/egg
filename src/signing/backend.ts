@@ -9,7 +9,7 @@
 
 import { type BbPluginApi, defineRpcContract, experimental_PluginRpcRefusal } from "@get-bb/plugin-sdk";
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { ACTIONS, type Action, type ActionArgs, type ActionResult } from "./actions.ts";
@@ -43,6 +43,7 @@ const REFUSAL_CODES: Record<string, "conflict" | "forbidden" | "invalid" | "not_
   key_not_found: "not_found",
   too_many_keys: "conflict",
   too_many_requests: "conflict",
+  last_key: "conflict",
 };
 
 async function refusing<T>(run: () => Promise<T>): Promise<T> {
@@ -93,11 +94,12 @@ export function registerSigning(bb: BbPluginApi, rooms: RoomDispatch): Keys {
     resetPath,
     takeResetFile: async () => {
       try {
+        const text = (await readFile(resetPath, "utf8")).slice(0, 200);
         await rm(resetPath);
-        return true;
+        return text;
       } catch {
         // Not there, or not removable: either way enrolment stands. A file that cannot be removed would otherwise reset it for ever.
-        return false;
+        return null;
       }
     },
     changed,

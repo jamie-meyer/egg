@@ -89,7 +89,10 @@ machine) is not enrolled by opening egg. It shows nothing, and one line:
 
 > This browser is not enrolled with egg, so egg shows nothing and does
 > nothing here. Its key is 1a2b-3c4d-5e6f-7a8b. Open egg in a browser where
-> it already works: it shows this key there, and A, then y, approves it. …
+> it already works: it shows this key there, and A, then y, approves it. If
+> egg works in no browser of yours, run this in your own terminal, then
+> reload (it clears every key and lets only this one in): mkdir -p … &&
+> echo 1a2b-3c4d-5e6f-7a8b > …/reset-enrollment
 
 Every enrolled page then shows a line with that key. Approve it only if you
 have just opened egg in another browser and it shows the same key: the name
@@ -98,17 +101,25 @@ beside the key is the asking browser's own word. `A` asks first, and only
 everything else, so only an enrolled browser can do them.
 
 **If egg works in no browser of yours**, something else was first, or the
-browser that was enrolled lost its storage. From your own terminal:
+browser that was enrolled lost its storage. Run the command the page prints,
+from your own terminal. It writes that page's key into the reset file:
 
 ```sh
-mkdir -p ~/.bb/plugins/egg && touch ~/.bb/plugins/egg/reset-enrollment
+mkdir -p ~/.bb/plugins/egg && echo 1a2b-3c4d-5e6f-7a8b > ~/.bb/plugins/egg/reset-enrollment
 ```
 
-(The page prints the exact path: `plugins/<plugin id>/reset-enrollment`
-under bb's data directory.) egg removes the file, forgets every key and
-every request, and the next page to open is enrolled. The file is under bb's
-data directory because bb's command sandbox does not let a thread write
-there.
+(The path is `plugins/<plugin id>/reset-enrollment` under bb's data
+directory.) egg removes the file and forgets every key and every request.
+**Only the key the file names is enrolled next**; anything else that asks,
+however fast, only waits as a request. This matters: an agent can ask in a
+loop, and would beat your page to an egg with no key. An empty reset file
+(`touch`) also resets, and then whatever asks first is enrolled; use it
+only when no agent is running. Nothing signed before a reset is accepted
+after it. The file is under bb's data directory because bb's command
+sandbox does not let a thread write there.
+
+The last enrolled key cannot be removed with `key_remove`, for the same
+reason: an egg with no key takes the first that asks.
 
 **When a call is refused** for a reason of signing, the page says so in the
 notebook in plain words ("Not sent: this browser is not enrolled with egg.
@@ -125,8 +136,8 @@ process.
 | Method | What it does | What a caller can read or change with it |
 | --- | --- | --- |
 | `signed` | carries out one action, when the call is signed by an enrolled key | Nothing without a valid signature. An unsigned, forged, replayed, stale or altered call is refused and changes nothing. |
-| `keys_state` | reads enrolment | **Reads:** the plugin id; each enrolled key's public half, fingerprint, the name its browser gave itself, how and when it was enrolled, which key approved it, and when it last signed (to the minute); the same for each request; egg's clock; the path of the reset file. **Changes:** nothing. It tells a caller that you use egg, from which browsers, and roughly when you last did. |
-| `key_enrol` | presents a public key | **On an egg with no key enrolled: that key is enrolled**, and its holder can do everything above. Your own page then says it is not enrolled; that line is the evidence, and the reset file is the way back. **Otherwise:** it adds a request, under a name of the caller's choosing, that every enrolled page shows until you answer it. At most 8 are kept; a request you refused gives way to a new one, one still waiting never does. A request can do nothing until you approve it with `A`, `y`. It cannot read anything. |
+| `keys_state` | reads enrolment | **Reads:** the plugin id; the key a reset named, if one is awaited; each enrolled key's public half, fingerprint, the name its browser gave itself, how and when it was enrolled, which key approved it, and when it last signed (to the minute); the same for each request; egg's clock; the path of the reset file. **Changes:** nothing. It tells a caller that you use egg, from which browsers, and roughly when you last did. |
+| `key_enrol` | presents a public key | **On an egg with no key enrolled, and no key named by a reset: that key is enrolled**, and its holder can do everything above. Your own page then says it is not enrolled; that line is the evidence, and the reset file is the way back. **Otherwise:** it adds a request, under a name of the caller's choosing, that every enrolled page shows until you answer it. At most 8 are kept; a request you refused gives way to a new one, one still waiting never does. A request can do nothing until you approve it with `A`, `y`. It cannot read anything. |
 
 Other ways in, which are not methods:
 
@@ -174,14 +185,24 @@ things egg does not control.
 - **Settings.** As the table above says, a thread can change egg's settings
   with `bb plugin config`. The page does not show that a setting changed.
   If it matters, look at `bb plugin config egg` before a long piece of work.
-- **First use.** Whatever opens an egg with no key first is enrolled.
+- **First use.** Whatever opens an egg with no key first is enrolled: after
+  installing or updating to this version, and after a reset with an empty
+  file. An agent that calls `key_enrol` in a loop would win. If your page
+  says it is not enrolled the first time you open it, that is what
+  happened; run the command it prints.
 - **The plugin's own code.** bb runs a plugin from where it was installed.
   If that is a folder a thread can write (a checkout an agent works in), the
   thread can change what egg is. `bb plugin disable` and `bb plugin
   uninstall` are open to a thread too.
-- **Requests can nag.** Any caller can make your page show up to 8 requests
-  under any name. None can do anything until you press `A`, `y`. Do that
-  only for a key you can see in a browser of yours.
+- **Requests can nag, and can crowd.** Any caller can make your page show
+  up to 8 requests under any name, and can ask again each time you refuse
+  one. None can do anything until you press `A`, `y`. Do that only for a
+  key you can see in a browser of yours. The oldest request is shown first,
+  so a real second browser may be behind them, or told the list is full; it
+  keeps asking and gets on when there is room.
+- **Load.** A caller can send `signed` large bodies naming an enrolled key;
+  egg reads each through before refusing it. Only bb's own limit on a
+  request's size bounds that.
 
 ## The probe
 

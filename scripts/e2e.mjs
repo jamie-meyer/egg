@@ -17,6 +17,7 @@
 //   signing  another key asks: X refuses it. The page's own key removed:     0
 //            the page goes blank and says what to do, a new room is not
 //            made and the notebook says why; approved again, it is back.
+//            A reset file naming the page's key lets only that key in.
 //            A page whose clock is ten minutes off still works.
 //   probe    scripts/probe.mjs: every signed action tried unsigned, forged,  0
 //            replayed, stale and with changed arguments; each refused, and
@@ -447,7 +448,7 @@ const steps = {
     const line = await signingLine(page);
     const resetPath = (await signer.state()).resetPath;
     check(line.key === ctx.pageKey, `the browser keeps its key (${line.key}) and asks with it again`);
-    check(line.text.includes(ctx.pageKey) && /not enrolled with egg/.test(line.text) && /A, then y, approves it/.test(line.text) && line.text.includes(`touch ${resetPath}`), `a browser that is not enrolled shows one plain line saying what to do: "${line.text}"`);
+    check(line.text.includes(ctx.pageKey) && /not enrolled with egg/.test(line.text) && /A, then y, approves it/.test(line.text) && line.text.includes(`echo ${ctx.pageKey} > ${resetPath}`), `a browser that is not enrolled shows one plain line saying what to do: "${line.text}"`);
     await page.waitFor("!document.querySelector('[data-egg-subject]') && document.querySelectorAll('[data-egg-card]').length === 0", { label: "the page goes blank" });
     check((await count(page, "[data-egg-line]:not([data-egg-unsent])")) === 0, "and shows nothing: no room, no lines, no views");
     await shot(page, "s1-not-enrolled");
@@ -472,6 +473,47 @@ const steps = {
     await page.waitFor("!document.querySelector('[data-egg-signing]')", { label: "the line goes once approved" });
     if (hadRoom) await page.waitFor(`!!document.querySelector('[data-egg-subject]') && ${cardsOnTable}.length > 0`, { timeout: 30000, label: "the room is back" });
     check((await unsentLines(page)).length === 0, `approved again, the page works as before${hadRoom ? ": its room is back" : ""}, and the notebook's line about it is gone`);
+
+    // The reset the page prints names its key: only that key gets in, though something else asks first and keeps asking.
+    if (plugin !== "egg") {
+      const agent = await makeSigner({ bb, plugin, label: "egg test: something that asks faster than a page" });
+      let asking = true;
+      const outcomes = new Set();
+      const hammer = (async () => {
+        while (asking) {
+          outcomes.add(await agent.enrol().catch((e) => e.message));
+          await sleep(5);
+        }
+      })();
+      await sleep(200);
+      writeFileSync(resetPath, `${ctx.pageKey}\n`);
+      const after = await waitFor(() => signer.state(), (st) => st.keys.length === 1 && st.keys[0].fingerprint === ctx.pageKey, 30_000, 250);
+      await sleep(1000);
+      asking = false;
+      await hammer;
+      check(after.keys.length === 1 && after.keys[0].fingerprint === ctx.pageKey && after.keys[0].how === "first", `a reset file that names the page's key clears every key and enrols only that one (${after.keys.map((k) => k.fingerprint).join(", ")})`);
+      check([...outcomes].join(",") === "pending" && !(await agent.enrolled()), `a key that asked throughout, before the page could, only waits (its answers: ${[...outcomes].join(", ")})`);
+      await page.waitFor("!document.querySelector('[data-egg-signing]')", { timeout: 15000, label: "the page is enrolled again by itself" });
+      // The script's own key went with the reset: it asks again, and the page approves it.
+      signer = await enrolledSigner({
+        bb,
+        plugin,
+        approve: async (fingerprint) => {
+          // The agent's request is older, so it is asked about first: X refuses it.
+          await page.waitFor(`document.querySelector('[data-egg-key-request]')?.dataset.eggKeyRequest === ${JSON.stringify(agent.fingerprint)}`, { label: "the agent's request shows first" });
+          // With no room yet, the page opened its new-room form on being enrolled: keys go to the form until it is closed.
+          await closeNewRoomForm(page);
+          await focusRoot(page);
+          await page.key("X");
+          await page.waitFor(`document.querySelector('[data-egg-key-request]')?.dataset.eggKeyRequest === ${JSON.stringify(fingerprint)}`, { label: "then the script's" });
+          await page.key("A");
+          await page.waitFor("!!document.querySelector('[data-egg-confirm-approve]')", { label: "the page asks before approving" });
+          await page.key("y");
+        },
+      });
+      check(await signer.enrolled(), "the page, enrolled again, refuses that key (X) and approves the script's new one (A, y)");
+      await rpc("key_remove", { fingerprint: agent.fingerprint });
+    }
 
     // A page whose clock is wrong still signs by egg's clock: p pins and unpins.
     if (hadRoom && (await selectFirstDone(page))) {

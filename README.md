@@ -278,8 +278,8 @@ silently. Open the page yourself after installing or updating, before agents
 run. Another browser (bb's web page as well as the desktop app) shows one
 line with its key and what to do: on a page where egg already works, `A`
 then `y` approves it and `X` refuses it. If egg works in no browser of
-yours, the page prints a `touch` command for your own terminal that resets
-enrolment.
+yours, the page prints a command for your own terminal that resets
+enrolment and lets only that page's key in.
 
 [docs/security.md](docs/security.md) has the rest: exactly what a signature
 covers, every method that is not signed and what it exposes, and what

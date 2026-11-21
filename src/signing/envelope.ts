@@ -92,6 +92,8 @@ export const keysStateSchema = z.object({
   requests: z.array(keyRequestSchema),
   /** The backend's clock, so that a page whose own clock is off still signs a time the backend accepts. */
   now: z.number(),
+  /** After a reset that named a key: the only key that may be enrolled next. Null otherwise. */
+  next: z.string().nullable(),
   /** The file whose presence resets enrolment. */
   resetPath: z.string(),
 });
@@ -124,12 +126,17 @@ export function signingRefusalIn(message: string): SigningRefusalCode | null {
   return null;
 }
 
-/** The command that resets enrolment, for the person's own terminal. */
-export function resetCommand(resetPath: string): string {
+/**
+ * The command that resets enrolment, for the person's own terminal. With a
+ * key, the file names it, and only that key is enrolled afterwards: without
+ * one, whatever asked first after the reset would be, and an agent can ask
+ * faster than a page.
+ */
+export function resetCommand(resetPath: string, fingerprint: string | null = null): string {
   if (!resetPath) return "";
   const dir = resetPath.replace(/\/[^/]*$/, "");
   const quote = (path: string) => (/^[A-Za-z0-9_./~-]+$/.test(path) ? path : `'${path.replace(/'/g, "'\\''")}'`);
-  return `mkdir -p ${quote(dir)} && touch ${quote(resetPath)}`;
+  return fingerprint ? `mkdir -p ${quote(dir)} && echo ${fingerprint} > ${quote(resetPath)}` : `mkdir -p ${quote(dir)} && touch ${quote(resetPath)}`;
 }
 
 export type PageStatus = "loading" | "enrolled" | "pending" | "refused" | "unavailable";
@@ -143,8 +150,8 @@ export function notEnrolledText(status: PageStatus, fingerprint: string | null, 
   if (status === "enrolled") return "";
   if (status === "loading") return "This browser's key for egg is still being read: try again in a moment.";
   if (status === "unavailable") return "This browser cannot keep a signing key for egg (no IndexedDB or WebCrypto here), so egg shows nothing and does nothing in it. Open egg in bb's own window, or another browser.";
-  const reset = resetCommand(resetPath);
-  const none = reset ? ` If egg works in no browser of yours, run this in your own terminal, then reload: ${reset}` : "";
+  const reset = resetCommand(resetPath, fingerprint);
+  const none = reset ? ` If egg works in no browser of yours, run this in your own terminal, then reload (it clears every key and lets only this one in): ${reset}` : "";
   const key = fingerprint ?? "(unknown)";
   if (status === "refused") return `This browser's key ${key} was refused from a browser enrolled with egg, so egg shows nothing and does nothing here.${none}`;
   if (crowded) return `This browser is not enrolled with egg, so egg shows nothing and does nothing here. Its key is ${key}. Other keys wait to be approved ahead of it, as many as egg keeps: open egg in a browser where it already works and refuse those you do not know (X). This key then shows there, and A, then y, approves it.${none}`;

@@ -31,7 +31,7 @@ async function browserKey() {
 function world(startAt = 1_000_000) {
   const kv = memoryKv();
   const clock = { now: startAt };
-  const reset = { present: false, removable: true };
+  const reset = { present: false, removable: true, text: "" };
   const log: string[] = [];
   let changes = 0;
   const make = () =>
@@ -43,14 +43,17 @@ function world(startAt = 1_000_000) {
       verify: verifyP256,
       resetPath: "/data/plugins/egg/reset-enrollment",
       takeResetFile: async () => {
-        if (!reset.present || !reset.removable) return false;
+        if (!reset.present || !reset.removable) return null;
         reset.present = false;
-        return true;
+        return reset.text;
       },
       changed: () => void changes++,
       log: (text) => void log.push(text),
     });
-  return { kv, clock, reset, log, keys: make(), restart: make, changes: () => changes };
+  const keys = make();
+  // Time has passed since the backend started: a call signed in its very first millisecond is refused.
+  clock.now += 1000;
+  return { kv, clock, reset, log, keys, restart: make, changes: () => changes };
 }
 
 /** A dispatch that records what ran. */
@@ -275,6 +278,9 @@ test("time: a call signed before the backend last started is stale, even inside 
   const restarted = w.restart();
   await refused(restarted.verify(before), "stale");
   await refused(restarted.verify(used), "stale");
+  // Even one signed in the millisecond it started.
+  await refused(restarted.verify(await key.sign("room_delete", { roomId: "r" }, w.clock.now)), "stale");
+  w.clock.now += 1;
   await restarted.verify(await key.sign("room_delete", { roomId: "r" }, w.clock.now));
 });
 
@@ -324,6 +330,64 @@ test("reset: the reset file clears every key and request, and the next page to a
   assert.ok(w.log.some((l) => l.includes("enrolment reset")));
 });
 
+test("reset: a file that names a key lets only that key in, however fast another asks", async () => {
+  const w = world();
+  const lost = await browserKey();
+  const person = await browserKey();
+  const agent = await browserKey();
+  await w.keys.enrol(lost.publicKey, "a browser that is gone");
+  w.reset.text = `${person.fingerprint}\n`;
+  w.reset.present = true;
+  // The agent asks first, and keeps asking.
+  assert.equal((await w.keys.enrol(agent.publicKey, "agent")).outcome, "pending");
+  assert.equal((await w.keys.enrol(agent.publicKey, "agent")).outcome, "pending");
+  let state = await w.keys.state();
+  assert.deepEqual([state.keys.length, state.next], [0, person.fingerprint]);
+  w.clock.now += 5;
+  await refused(w.keys.verify(await agent.sign("rooms_list", null, w.clock.now)), "unknown_key");
+  assert.equal((await w.keys.enrol(person.publicKey, "the person's page")).outcome, "enrolled-first");
+  state = await w.keys.state();
+  assert.deepEqual([state.keys.map((k) => k.fingerprint), state.next, state.requests.map((r) => r.fingerprint)], [[person.fingerprint], null, [agent.fingerprint]]);
+  await w.keys.verify(await person.sign("rooms_list", null, w.clock.now));
+  // A later reset with an empty file forgets the name.
+  w.reset.text = "";
+  w.reset.present = true;
+  assert.equal((await w.keys.state()).next, null);
+  // Text that is not a fingerprint names nothing.
+  w.reset.text = "let me in";
+  w.reset.present = true;
+  assert.equal((await w.keys.state()).next, null);
+});
+
+test("reset: a call signed before it is no good after it, though the same key is enrolled again", async () => {
+  const w = world();
+  const key = await browserKey();
+  await w.keys.enrol(key.publicKey, "page");
+  const used = await key.sign("say", { roomId: "r", text: "once", source: "typed" }, w.clock.now);
+  const unused = await key.sign("room_delete", { roomId: "r" }, w.clock.now);
+  await w.keys.verify(used);
+  w.clock.now += 10_000;
+  w.reset.present = true;
+  assert.equal((await w.keys.enrol(key.publicKey, "page")).outcome, "enrolled-first");
+  await refused(w.keys.verify(used), "stale");
+  await refused(w.keys.verify(unused), "stale");
+  w.clock.now += 1;
+  await w.keys.verify(await key.sign("room_delete", { roomId: "r" }, w.clock.now));
+});
+
+test("the last enrolled key is not removed: with none, whatever asked first would be enrolled", async () => {
+  const w = world();
+  const first = await browserKey();
+  const second = await browserKey();
+  await w.keys.enrol(first.publicKey, "first");
+  await refused(w.keys.remove(first.fingerprint, first.fingerprint), "last_key");
+  await w.keys.enrol(second.publicKey, "second");
+  await w.keys.approve(second.fingerprint, first.fingerprint);
+  await w.keys.remove(first.fingerprint, second.fingerprint);
+  await refused(w.keys.remove(second.fingerprint, second.fingerprint), "last_key");
+  assert.deepEqual((await w.keys.state()).keys.map((k) => k.fingerprint), [second.fingerprint]);
+});
+
 test("reset: noticed by whatever asks about keys next; a file that cannot be removed resets nothing", async () => {
   const w = world();
   const first = await browserKey();
@@ -343,6 +407,7 @@ test("reset path: under bb's data directory, named for the installed plugin", ()
   assert.equal(resetPathIn("/data", "egg-check"), "/data/plugins/egg-check/reset-enrollment");
   assert.equal(resetCommand("/data/plugins/egg/reset-enrollment"), "mkdir -p /data/plugins/egg && touch /data/plugins/egg/reset-enrollment");
   assert.equal(resetCommand("/my data/plugins/egg/reset-enrollment"), "mkdir -p '/my data/plugins/egg' && touch '/my data/plugins/egg/reset-enrollment'");
+  assert.equal(resetCommand("/data/plugins/egg/reset-enrollment", "1111-2222-3333-4444"), "mkdir -p /data/plugins/egg && echo 1111-2222-3333-4444 > /data/plugins/egg/reset-enrollment");
 });
 
 test("last used: written at most once a minute, however often the page reads", async () => {
@@ -448,7 +513,7 @@ test("the page tells a signing refusal from any other failure, and says each in 
   assert.equal(signingRefusalIn("No room r_123"), null);
   assert.equal(notEnrolledText("enrolled", "a", "/p"), "");
   const pending = notEnrolledText("pending", "1111-2222-3333-4444", "/data/plugins/egg/reset-enrollment");
-  assert.ok(pending.includes("1111-2222-3333-4444") && pending.includes("A, then y, approves it") && pending.includes("touch /data/plugins/egg/reset-enrollment"));
+  assert.ok(pending.includes("1111-2222-3333-4444") && pending.includes("A, then y, approves it") && pending.includes("echo 1111-2222-3333-4444 > /data/plugins/egg/reset-enrollment"));
   assert.ok(notEnrolledText("refused", "1111-2222-3333-4444", "/x/y").includes("was refused"));
   assert.ok(notEnrolledText("unavailable", null, "").includes("cannot keep a signing key"));
   assert.ok(notEnrolledText("pending", "1111-2222-3333-4444", "/x/y", true).includes("refuse those you do not know (X)"));

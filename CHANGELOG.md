@@ -10,7 +10,7 @@
   interface are gone; there is one, `signed`. The first browser to open egg
   is enrolled silently; another shows a line with its key, and `A` then `y`
   on an enrolled page approves it. A reset file under bb's data directory
-  clears enrolment. [docs/security.md](docs/security.md) says what a
+  clears enrolment and names the one key to enrol next. [docs/security.md](docs/security.md) says what a
   signature covers, what is not signed, and what signing cannot protect.
   `scripts/probe.mjs` tries every action without the key.
 - **A view is settled only by its own thread.** A thread that merely

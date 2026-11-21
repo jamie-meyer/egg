@@ -18,6 +18,7 @@ import {
   TOO_MANY_WAITING,
   enrolledKeySchema,
   envelopeSchema,
+  fingerprintSchema,
   fingerprintText,
   formatFingerprint,
   keyRequestSchema,
@@ -27,6 +28,8 @@ import {
 
 const KEY = "key:";
 const REQUEST = "keyreq:";
+/** After a reset that named a key: the only key that may be enrolled next. */
+const NEXT = "keynext";
 /** Requests kept at once, pending and refused together: anyone can ask, so asking is bounded. */
 export const MAX_REQUESTS = 8;
 export const MAX_KEYS = 12;
@@ -68,8 +71,8 @@ export interface KeyDeps {
   verify(key: PublicKey, text: string, sig: string): boolean;
   /** Where the reset file is looked for. */
   resetPath: string;
-  /** Take the reset file away if it is there. True only when it was there and is now gone. */
-  takeResetFile(): Promise<boolean>;
+  /** Take the reset file away if it is there. Its text when it was there and is now gone; null otherwise. */
+  takeResetFile(): Promise<string | null>;
   /** Enrolment changed: tell the pages. */
   changed(): void;
   /** One line for bb's log about a change of enrolment. */
@@ -85,7 +88,7 @@ export interface Keys {
   // Signed actions: `by` is the key that signed the call.
   approve(fingerprint: string, by: string): Promise<EnrolledKey>;
   refuse(fingerprint: string, by: string): Promise<void>;
-  /** Remove an enrolled key, or forget a request so that page can ask again. */
+  /** Remove an enrolled key, or forget a request so that page can ask again. The last enrolled key is not removed: that is what the reset file is for. */
   remove(fingerprint: string, by: string): Promise<void>;
   /** Clear every key if the reset file is there. Returns whether it did. */
   resetIfAsked(): Promise<boolean>;
@@ -95,7 +98,7 @@ export function createKeys(deps: KeyDeps): Keys {
   const { kv } = deps;
   const locked = serial();
   /** When this backend started: a call signed before then is refused, since the nonces it had seen are forgotten. */
-  const startedAt = deps.now();
+  let startedAt = deps.now();
   const seen = new Map<string, number>();
 
   const fingerprintOf = (key: PublicKey): string => formatFingerprint(deps.hash(fingerprintText(key)));
@@ -108,11 +111,17 @@ export function createKeys(deps: KeyDeps): Keys {
 
   const resetIfAsked: Keys["resetIfAsked"] = () =>
     locked("keys", async () => {
-      if (!(await deps.takeResetFile().catch(() => false))) return false;
+      const text = await deps.takeResetFile().catch(() => null);
+      if (text === null) return false;
       const all = await kv.list(KEY);
       for (const key of [...all, ...(await kv.list(REQUEST))]) await kv.delete(key);
-      seen.clear();
-      deps.log(`enrolment reset by the reset file: ${all.length} key${all.length === 1 ? "" : "s"} removed`);
+      // The file may name the key to enrol next. Then no other key is: whatever else asks first only waits.
+      const named = fingerprintSchema.safeParse(text.trim());
+      if (named.success) await kv.set(NEXT, named.data);
+      else await kv.delete(NEXT);
+      // Nothing signed before the reset is good after it, by the key that was enrolled or any other.
+      startedAt = deps.now();
+      deps.log(`enrolment reset by the reset file: ${all.length} key${all.length === 1 ? "" : "s"} removed${named.success ? `; only ${named.data} may be enrolled next` : ""}`);
       deps.changed();
       return true;
     });
@@ -126,7 +135,8 @@ export function createKeys(deps: KeyDeps): Keys {
 
     async state() {
       await resetIfAsked();
-      return { plugin: deps.plugin, keys: await keys(), requests: await requests(), now: deps.now(), resetPath: deps.resetPath };
+      const next = fingerprintSchema.safeParse(await kv.get(NEXT));
+      return { plugin: deps.plugin, keys: await keys(), requests: await requests(), next: next.success ? next.data : null, now: deps.now(), resetPath: deps.resetPath };
     },
 
     async enrol(rawKey, rawLabel) {
@@ -139,7 +149,9 @@ export function createKeys(deps: KeyDeps): Keys {
       return locked("keys", async () => {
         const enrolled = await keys();
         if (enrolled.some((entry) => entry.fingerprint === fingerprint)) return { outcome: "enrolled" as const, fingerprint };
-        if (enrolled.length === 0) {
+        const next = fingerprintSchema.safeParse(await kv.get(NEXT));
+        if (enrolled.length === 0 && (!next.success || next.data === fingerprint)) {
+          await kv.delete(NEXT);
           const first: EnrolledKey = { fingerprint, key, label, enrolledAt: deps.now(), how: "first", approvedBy: null, lastUsedAt: null };
           await kv.set(KEY + fingerprint, first);
           await kv.delete(REQUEST + fingerprint);
@@ -171,7 +183,7 @@ export function createKeys(deps: KeyDeps): Keys {
       const enrolled = enrolledKeySchema.safeParse(await kv.get(KEY + envelope.key));
       if (!enrolled.success || enrolled.data.fingerprint !== envelope.key) return refuse("unknown_key", `${SIGNING_REFUSALS.unknown_key} (${envelope.key})`);
       const now = deps.now();
-      if (!Number.isFinite(envelope.at) || Math.abs(now - envelope.at) > SIGNATURE_WINDOW_MS || envelope.at < startedAt) {
+      if (!Number.isFinite(envelope.at) || Math.abs(now - envelope.at) > SIGNATURE_WINDOW_MS || envelope.at <= startedAt) {
         return refuse("stale", `${SIGNING_REFUSALS.stale}: sign it again`);
       }
       // The signature is checked before the nonce is remembered, so that an unsigned call cannot use one up.
@@ -224,6 +236,7 @@ export function createKeys(deps: KeyDeps): Keys {
         const enrolled = (await kv.get(KEY + fingerprint)) !== undefined;
         const requested = (await kv.get(REQUEST + fingerprint)) !== undefined;
         if (!enrolled && !requested) throw new Refusal("key_not_found", `there is no key ${fingerprint}`);
+        if (enrolled && (await kv.list(KEY)).length <= 1) throw new Refusal("last_key", "that is the only key enrolled with egg, and it is not removed this way: with none, whatever asked first would be enrolled. The reset file clears enrolment");
         await kv.delete(KEY + fingerprint);
         await kv.delete(REQUEST + fingerprint);
         deps.log(`key ${fingerprint} removed by ${by}`);
