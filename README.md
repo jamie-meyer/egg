@@ -16,10 +16,10 @@ specific to one kind of folder.
 You need bb 0.49 or newer.
 
 ```sh
-bb plugin install 'git:https://github.com/jamie-meyer/egg.git@^0.1.0'
+bb plugin install 'git:https://github.com/jamie-meyer/egg.git@^0.2.0'
 ```
 
-That follows tagged releases from 0.1.0 up to, not including, 0.2.0;
+That follows tagged releases from 0.2.0 up to, not including, 0.3.0;
 `bb plugin update egg` brings the newer ones. Rooms and settings survive an
 update.
 
